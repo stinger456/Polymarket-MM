@@ -2,11 +2,12 @@
 Market discovery for Polymarket hourly BTC markets.
 
 Uses the Gamma API to find and track active markets.
+Supports fetching by event slug (e.g., "bitcoin-up-or-down-january-21-8pm-et").
 """
 
 import re
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import httpx
 import structlog
@@ -56,8 +57,9 @@ class MarketDiscovery:
         "btc-up-or-down",
     ]
 
-    def __init__(self, gamma_url: Optional[str] = None):
+    def __init__(self, gamma_url: Optional[str] = None, event_slug: Optional[str] = None):
         self.gamma_url = gamma_url or self.GAMMA_URL
+        self.event_slug = event_slug  # Optional: specific event to trade
         self._client: Optional[httpx.AsyncClient] = None
         self._markets_cache: List[Market] = []
         self._cache_time: Optional[datetime] = None
@@ -73,6 +75,109 @@ class MarketDiscovery:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    async def get_event_by_slug(self, slug: str) -> Optional[dict]:
+        """
+        Fetch a specific event by its slug.
+
+        Args:
+            slug: Event slug (e.g., "bitcoin-up-or-down-january-21-8pm-et")
+
+        Returns:
+            Event data with nested markets, or None
+        """
+        client = await self._get_client()
+
+        try:
+            response = await client.get(
+                f"{self.gamma_url}/events",
+                params={"slug": slug},
+            )
+            response.raise_for_status()
+            events = response.json()
+
+            if events:
+                event = events[0]
+                logger.info(
+                    "Found event by slug",
+                    slug=slug,
+                    title=event.get("title", ""),
+                    markets_count=len(event.get("markets", [])),
+                )
+                return event
+
+            logger.warning("Event not found", slug=slug)
+            return None
+
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch event by slug", slug=slug, error=str(e))
+            return None
+
+    async def get_markets_from_event(self, event: dict) -> List[Market]:
+        """
+        Parse all active markets from an event.
+
+        Args:
+            event: Event data from Gamma API
+
+        Returns:
+            List of Market objects
+        """
+        markets = []
+        event_markets = event.get("markets", [])
+
+        for raw_market in event_markets:
+            market = self._parse_market(raw_market)
+            if market and market.is_active:
+                markets.append(market)
+
+        # Sort by end time
+        markets.sort(key=lambda m: m.end_time)
+
+        logger.info("Parsed markets from event", count=len(markets))
+        return markets
+
+    async def find_btc_hourly_events(self) -> List[dict]:
+        """
+        Search for Bitcoin UP/DOWN hourly events.
+
+        Returns list of events matching the pattern.
+        """
+        client = await self._get_client()
+
+        try:
+            # Search for active events with "bitcoin" in title
+            response = await client.get(
+                f"{self.gamma_url}/events",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": 100,
+                },
+            )
+            response.raise_for_status()
+            events = response.json()
+
+            btc_events = []
+            for event in events:
+                title = event.get("title", "").lower()
+                slug = event.get("slug", "").lower()
+
+                # Match "bitcoin up or down" pattern
+                if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
+                    btc_events.append(event)
+                    logger.info(
+                        "Found BTC hourly event",
+                        title=event.get("title"),
+                        slug=slug,
+                        markets_count=len(event.get("markets", [])),
+                    )
+
+            return btc_events
+
+        except httpx.HTTPError as e:
+            logger.error("Failed to search for BTC events", error=str(e))
+            return []
 
     async def get_all_markets(self, limit: int = 100) -> List[dict]:
         """
@@ -366,48 +471,41 @@ class MarketDiscovery:
         """
         Find all active hourly BTC markets.
 
-        Tries multiple sources:
-        1. Gamma API /markets endpoint
-        2. CLOB API /markets endpoint
-        3. Gamma API /events endpoint
+        If event_slug is set, fetches markets from that specific event.
+        Otherwise, searches for BTC UP/DOWN events automatically.
 
         Returns markets sorted by end time (soonest first).
         """
         markets = []
 
-        # Try Gamma API markets
-        raw_markets = await self.get_all_markets()
-        for raw_market in raw_markets:
-            if self._is_hourly_btc_market(raw_market):
-                market = self._parse_market(raw_market)
-                if market and market.is_active:
-                    markets.append(market)
+        # If specific event slug is provided, use that directly
+        if self.event_slug:
+            logger.info("Fetching markets from specified event", slug=self.event_slug)
+            event = await self.get_event_by_slug(self.event_slug)
+            if event:
+                markets = await self.get_markets_from_event(event)
+                if markets:
+                    self._markets_cache = markets
+                    self._cache_time = datetime.now(timezone.utc)
+                    logger.info("Found markets from event", count=len(markets))
+                    return markets
 
-        # If no markets found, try CLOB API
-        if not markets:
-            logger.info("No markets from Gamma API, trying CLOB API...")
-            clob_markets = await self.get_btc_hourly_from_clob()
-            for raw_market in clob_markets:
-                market = self._parse_market(raw_market)
-                if market and market.is_active:
-                    markets.append(market)
+        # Otherwise, search for BTC hourly events
+        logger.info("Searching for BTC hourly events...")
+        btc_events = await self.find_btc_hourly_events()
 
-        # If still no markets, try events endpoint
-        if not markets:
-            logger.info("No markets from CLOB API, trying events...")
-            events = await self.get_events()
-            for event in events:
-                title = event.get("title", "").lower()
-                slug = event.get("slug", "").lower()
-                # Check if it's a BTC hourly event
-                if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
-                    logger.info("Found BTC event", title=title, slug=slug)
-                    # Get markets from this event
-                    event_markets = event.get("markets", [])
-                    for raw_market in event_markets:
-                        market = self._parse_market(raw_market)
-                        if market:
-                            markets.append(market)
+        for event in btc_events:
+            event_markets = await self.get_markets_from_event(event)
+            markets.extend(event_markets)
+
+        # Deduplicate by condition_id
+        seen = set()
+        unique_markets = []
+        for m in markets:
+            if m.condition_id not in seen:
+                seen.add(m.condition_id)
+                unique_markets.append(m)
+        markets = unique_markets
 
         # Sort by end time
         markets.sort(key=lambda m: m.end_time)

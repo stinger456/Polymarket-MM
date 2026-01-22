@@ -89,7 +89,10 @@ class Orchestrator:
         setup_logging(level=self.config.log_level)
 
         # Initialize market discovery
-        self.market_discovery = MarketDiscovery(self.config.gamma_url)
+        self.market_discovery = MarketDiscovery(
+            gamma_url=self.config.gamma_url,
+            event_slug=self.config.event_slug,
+        )
 
         # Initialize price feed
         if self.config.paper_trading:

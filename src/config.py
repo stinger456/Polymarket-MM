@@ -184,6 +184,13 @@ class Config(BaseSettings):
         description="Signature type: 0=EOA, 1=Email/Magic, 2=Browser proxy"
     )
 
+    # Event slug for specific market trading
+    event_slug: Optional[str] = Field(
+        default=None,
+        alias="POLY_EVENT_SLUG",
+        description="Event slug to trade (e.g., 'bitcoin-up-or-down-january-22-8pm-et')"
+    )
+
     class Config:
         env_prefix = ""
         populate_by_name = True
@@ -312,13 +319,18 @@ def create_read_only_client(config: Config):
     return ClobClient(config.clob_url)
 
 
-def load_config(config_path: Optional[str] = None, paper_trading: bool = True) -> Config:
+def load_config(
+    config_path: Optional[str] = None,
+    paper_trading: bool = True,
+    event_slug: Optional[str] = None,
+) -> Config:
     """
     Load configuration from environment and optional YAML file.
 
     Args:
         config_path: Path to YAML config file
         paper_trading: Override paper trading setting
+        event_slug: Event slug to trade
 
     Returns:
         Config: Loaded configuration
@@ -331,5 +343,9 @@ def load_config(config_path: Optional[str] = None, paper_trading: bool = True) -
     # Override paper trading if specified
     if paper_trading is not None:
         config.paper_trading = paper_trading
+
+    # Override event slug if specified
+    if event_slug is not None:
+        config.event_slug = event_slug
 
     return config

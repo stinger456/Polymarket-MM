@@ -57,6 +57,12 @@ Examples:
         default="INFO",
         help="Log level (default: INFO)",
     )
+    parser.add_argument(
+        "--event",
+        type=str,
+        default=None,
+        help="Event slug to trade (e.g., 'bitcoin-up-or-down-january-22-8pm-et')",
+    )
 
     return parser.parse_args()
 
@@ -83,6 +89,7 @@ def main():
         config = load_config(
             config_path=args.config,
             paper_trading=paper_trading,
+            event_slug=args.event,
         )
     except Exception as e:
         logger.error("Failed to load config", error=str(e))
