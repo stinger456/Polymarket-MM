@@ -33,9 +33,18 @@ def main():
     all_markets = resp.get("data", []) if isinstance(resp, dict) else []
     print(f"Found {len(all_markets)} total markets")
 
-    # Filter for ACTIVE markets only
-    markets = [m for m in all_markets if m.get("active") == True and m.get("closed") == False]
-    print(f"Active markets: {len(markets)}\n")
+    # Debug: show first market structure
+    if all_markets:
+        m = all_markets[0]
+        print(f"\nSample market keys: {list(m.keys())}")
+        print(f"  active={m.get('active')} (type={type(m.get('active'))})")
+        print(f"  closed={m.get('closed')} (type={type(m.get('closed'))})")
+        print(f"  enable_order_book={m.get('enable_order_book')}")
+        print(f"  accepting_orders={m.get('accepting_orders')}")
+
+    # Just use all markets that have tokens - skip the active filter for now
+    markets = [m for m in all_markets if m.get("tokens") and len(m.get("tokens", [])) >= 2]
+    print(f"\nMarkets with tokens: {len(markets)}\n")
 
     if not markets:
         print("No active markets!")
