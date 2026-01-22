@@ -28,6 +28,7 @@ class MarketDiscovery:
     """
 
     GAMMA_URL = "https://gamma-api.polymarket.com"
+    CLOB_URL = "https://clob.polymarket.com"
 
     # Patterns to identify hourly BTC markets
     BTC_PATTERNS = [
@@ -47,6 +48,12 @@ class MarketDiscovery:
         r"15.?min",  # Exclude 15-minute markets
         r"4.?hour",  # Exclude 4-hour markets
         r"weekly",
+    ]
+
+    # Known event slug patterns for hourly BTC markets
+    HOURLY_EVENT_PATTERNS = [
+        "bitcoin-up-or-down",
+        "btc-up-or-down",
     ]
 
     def __init__(self, gamma_url: Optional[str] = None):
@@ -101,6 +108,90 @@ class MarketDiscovery:
 
         except httpx.HTTPError as e:
             logger.error("Failed to fetch markets", error=str(e))
+            return []
+
+    async def get_events(self, limit: int = 100) -> List[dict]:
+        """
+        Fetch events from Gamma API.
+        Events can contain multiple related markets.
+        """
+        client = await self._get_client()
+
+        try:
+            response = await client.get(
+                f"{self.gamma_url}/events",
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "limit": limit,
+                },
+            )
+            response.raise_for_status()
+            events = response.json()
+            logger.info("Fetched events", count=len(events))
+            return events
+
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch events", error=str(e))
+            return []
+
+    async def search_markets(self, query: str) -> List[dict]:
+        """
+        Search for markets using the CLOB API.
+        """
+        client = await self._get_client()
+
+        try:
+            # Try CLOB API search
+            response = await client.get(
+                f"{self.CLOB_URL}/markets",
+            )
+            response.raise_for_status()
+            markets = response.json()
+
+            # Filter by query
+            query_lower = query.lower()
+            filtered = []
+            for m in markets:
+                q = m.get("question", "").lower()
+                desc = m.get("description", "").lower()
+                if query_lower in q or query_lower in desc:
+                    filtered.append(m)
+
+            logger.info("Search results", query=query, count=len(filtered))
+            return filtered
+
+        except httpx.HTTPError as e:
+            logger.error("Failed to search markets", error=str(e))
+            return []
+
+    async def get_btc_hourly_from_clob(self) -> List[dict]:
+        """
+        Get BTC hourly markets directly from CLOB API.
+        """
+        client = await self._get_client()
+
+        try:
+            response = await client.get(f"{self.CLOB_URL}/markets")
+            response.raise_for_status()
+            all_markets = response.json()
+
+            # Filter for BTC up/down hourly markets
+            btc_hourly = []
+            for m in all_markets:
+                q = m.get("question", "").lower()
+                # Look for BTC/Bitcoin + price levels
+                if ("btc" in q or "bitcoin" in q) and ("above" in q or "below" in q or "up" in q or "down" in q):
+                    # Exclude long-term markets
+                    if "$1m" not in q and "million" not in q and "100k" not in q.replace(",", ""):
+                        btc_hourly.append(m)
+                        logger.debug("Found potential BTC hourly market", question=m.get("question", "")[:60])
+
+            logger.info("Found BTC hourly markets from CLOB", count=len(btc_hourly))
+            return btc_hourly
+
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch from CLOB", error=str(e))
             return []
 
     def _is_hourly_btc_market(self, market: dict) -> bool:
@@ -275,16 +366,48 @@ class MarketDiscovery:
         """
         Find all active hourly BTC markets.
 
+        Tries multiple sources:
+        1. Gamma API /markets endpoint
+        2. CLOB API /markets endpoint
+        3. Gamma API /events endpoint
+
         Returns markets sorted by end time (soonest first).
         """
-        raw_markets = await self.get_all_markets()
-
         markets = []
+
+        # Try Gamma API markets
+        raw_markets = await self.get_all_markets()
         for raw_market in raw_markets:
             if self._is_hourly_btc_market(raw_market):
                 market = self._parse_market(raw_market)
                 if market and market.is_active:
                     markets.append(market)
+
+        # If no markets found, try CLOB API
+        if not markets:
+            logger.info("No markets from Gamma API, trying CLOB API...")
+            clob_markets = await self.get_btc_hourly_from_clob()
+            for raw_market in clob_markets:
+                market = self._parse_market(raw_market)
+                if market and market.is_active:
+                    markets.append(market)
+
+        # If still no markets, try events endpoint
+        if not markets:
+            logger.info("No markets from CLOB API, trying events...")
+            events = await self.get_events()
+            for event in events:
+                title = event.get("title", "").lower()
+                slug = event.get("slug", "").lower()
+                # Check if it's a BTC hourly event
+                if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
+                    logger.info("Found BTC event", title=title, slug=slug)
+                    # Get markets from this event
+                    event_markets = event.get("markets", [])
+                    for raw_market in event_markets:
+                        market = self._parse_market(raw_market)
+                        if market:
+                            markets.append(market)
 
         # Sort by end time
         markets.sort(key=lambda m: m.end_time)
