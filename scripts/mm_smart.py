@@ -173,18 +173,54 @@ class SmartMarketMaker:
         analysis["profit"] = profit
         analysis["profit_cents"] = profit_cents
 
+        # Calculate worst-case loss if only one side fills
+        # Loss = spread on that side (buy at our_bid, sell at best_bid)
+        yes_exit_loss = (our_yes_bid - yes_best_bid) * ORDER_SIZE
+        no_exit_loss = (our_no_bid - no_best_bid) * ORDER_SIZE
+        max_exit_loss = max(yes_exit_loss, no_exit_loss)
+
+        analysis["yes_exit_loss"] = yes_exit_loss
+        analysis["no_exit_loss"] = no_exit_loss
+        analysis["max_exit_loss"] = max_exit_loss
+
+        expected_profit = profit * ORDER_SIZE
+
         # Check profitability
         if profit_cents < MIN_EDGE_CENTS:
             analysis["reason"] = f"Not profitable: {profit_cents:.1f}¢ edge (need {MIN_EDGE_CENTS}¢)"
             return analysis
 
-        # Check liquidity - need enough size at the ask for when we want to exit
+        # KEY CHECK: Only trade if profit > potential exit loss
+        if expected_profit <= max_exit_loss:
+            analysis["reason"] = f"Risk too high: profit ${expected_profit:.2f} <= exit loss ${max_exit_loss:.2f}"
+            return analysis
+
+        # Check spreads are tight (max 2 cents each side)
+        if analysis["yes_spread"] > 0.02:
+            analysis["reason"] = f"YES spread too wide: ${analysis['yes_spread']:.2f}"
+            return analysis
+        if analysis["no_spread"] > 0.02:
+            analysis["reason"] = f"NO spread too wide: ${analysis['no_spread']:.2f}"
+            return analysis
+
+        # Check liquidity - need enough size at the bid to EXIT if needed
+        yes_bid_size = yes_ob["bids"][0][1] if yes_ob["bids"] else 0
+        no_bid_size = no_ob["bids"][0][1] if no_ob["bids"] else 0
+
+        if yes_bid_size < ORDER_SIZE:
+            analysis["reason"] = f"Can't exit YES: bid size {yes_bid_size:.0f} < {ORDER_SIZE}"
+            return analysis
+        if no_bid_size < ORDER_SIZE:
+            analysis["reason"] = f"Can't exit NO: bid size {no_bid_size:.0f} < {ORDER_SIZE}"
+            return analysis
+
+        # Check liquidity at ask for entry
         if yes_ask_size < ORDER_SIZE or no_ask_size < ORDER_SIZE:
-            analysis["reason"] = f"Low liquidity: YES={yes_ask_size:.0f}, NO={no_ask_size:.0f}"
+            analysis["reason"] = f"Low ask liquidity: YES={yes_ask_size:.0f}, NO={no_ask_size:.0f}"
             return analysis
 
         analysis["tradeable"] = True
-        analysis["reason"] = f"✓ {profit_cents:.1f}¢ edge"
+        analysis["reason"] = f"✓ {profit_cents:.1f}¢ edge | Exit risk: ${max_exit_loss:.2f}"
         return analysis
 
     def display_orderbook(self, analysis: Dict):
@@ -209,6 +245,9 @@ class SmartMarketMaker:
         print(f"   Our NO bid:  ${analysis['our_no_bid']:.2f}")
         print(f"   Total:       ${analysis['total_cost']:.2f}")
         print(f"   Profit:      ${analysis['profit']:.2f} ({analysis['profit_cents']:.1f}¢ per share)")
+        print()
+        if "max_exit_loss" in analysis:
+            print(f"   ⚠️  Exit Risk: YES=${analysis['yes_exit_loss']:.2f} | NO=${analysis['no_exit_loss']:.2f}")
         print()
         print(f"   Status: {analysis['reason']}")
 
