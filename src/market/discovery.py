@@ -434,23 +434,43 @@ class MarketDiscovery:
             tokens = raw_market.get("tokens", [])
             clob_token_ids = raw_market.get("clobTokenIds", [])
 
+            # Parse clobTokenIds if it's a JSON string (API sometimes returns strings)
+            if isinstance(clob_token_ids, str):
+                try:
+                    import json
+                    clob_token_ids = json.loads(clob_token_ids)
+                except:
+                    clob_token_ids = []
+
             yes_token_id = None
             no_token_id = None
 
             # Try to get from tokens array (various key names)
+            if isinstance(tokens, str):
+                try:
+                    import json
+                    tokens = json.loads(tokens)
+                except:
+                    tokens = []
+
             for token in tokens:
-                outcome = token.get("outcome", "").lower()
-                token_id = token.get("token_id") or token.get("tokenId") or token.get("id")
-                if outcome == "yes":
-                    yes_token_id = token_id
-                elif outcome == "no":
-                    no_token_id = token_id
+                if isinstance(token, dict):
+                    outcome = token.get("outcome", "").lower()
+                    token_id = token.get("token_id") or token.get("tokenId") or token.get("id")
+                    if outcome == "yes":
+                        yes_token_id = token_id
+                    elif outcome == "no":
+                        no_token_id = token_id
 
             # Fallback to clobTokenIds (index 0 = YES, index 1 = NO)
-            if not yes_token_id and len(clob_token_ids) >= 1:
+            if not yes_token_id and isinstance(clob_token_ids, list) and len(clob_token_ids) >= 1:
                 yes_token_id = clob_token_ids[0]
-            if not no_token_id and len(clob_token_ids) >= 2:
+            if not no_token_id and isinstance(clob_token_ids, list) and len(clob_token_ids) >= 2:
                 no_token_id = clob_token_ids[1]
+
+            logger.info("Parsed token IDs",
+                       yes_token=yes_token_id[:30] if yes_token_id else "NONE",
+                       no_token=no_token_id[:30] if no_token_id else "NONE")
 
             if not yes_token_id or not no_token_id:
                 logger.debug("Missing token IDs",
