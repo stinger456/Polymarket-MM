@@ -208,14 +208,15 @@ class MarketDiscovery:
 
     async def find_btc_hourly_events(self) -> List[dict]:
         """
-        Search for Bitcoin UP/DOWN hourly events ONLY.
-        This filters strictly for "Bitcoin Up or Down" hourly markets.
+        Search for Bitcoin UP/DOWN hourly events.
+        Fetches WITHOUT active/closed filters since hourly markets may not appear otherwise.
         """
         try:
+            # Fetch WITHOUT active/closed filters - hourly markets don't always appear
             response = await self._request_with_retry(
                 "GET",
                 f"{self.gamma_url}/events",
-                params={"active": "true", "closed": "false", "limit": 200},
+                params={"limit": 500},  # Get more events, filter client-side
             )
             events = response.json()
 
@@ -226,35 +227,44 @@ class MarketDiscovery:
                 title = event.get("title", "").lower()
                 slug = event.get("slug", "").lower()
 
-                # STRICT FILTER: Only "Bitcoin Up or Down" hourly markets
-                # Must match pattern like "bitcoin-up-or-down-january-22-9am-et"
-                is_hourly_updown = (
+                # Match hourly BTC up/down by slug pattern (most reliable)
+                is_hourly_slug = "bitcoin" in slug and "up-or-down" in slug
+
+                # Also match by title pattern
+                is_hourly_title = (
                     ("bitcoin" in title or "btc" in title) and
                     "up" in title and "down" in title and
-                    # Exclude long-term markets
+                    # Exclude non-hourly markets
                     "microstrategy" not in title and
                     "150k" not in title and
                     "80k" not in title and
-                    "$1" not in title and  # Excludes $100k, $150k, etc.
                     "salvador" not in title and
-                    "hit" not in title  # Excludes "Will Bitcoin hit X"
+                    "hit" not in title
                 )
 
-                # Also check slug for hourly pattern
-                is_hourly_slug = "up-or-down" in slug and ("am-et" in slug or "pm-et" in slug)
+                if is_hourly_slug or is_hourly_title:
+                    # Check if event has any non-closed markets
+                    markets = event.get("markets", [])
+                    has_open_market = any(not m.get("closed", True) for m in markets)
 
-                if is_hourly_updown or is_hourly_slug:
-                    logger.info("Found HOURLY BTC UP/DOWN event",
-                               title=event.get("title"),
-                               slug=slug)
-                    btc_hourly_events.append(event)
+                    if has_open_market:
+                        logger.info("Found HOURLY BTC UP/DOWN event",
+                                   title=event.get("title"),
+                                   slug=slug,
+                                   markets=len(markets))
+                        btc_hourly_events.append(event)
+                    else:
+                        logger.debug("Hourly event but all markets closed", slug=slug)
 
             if btc_hourly_events:
                 logger.info("Found hourly BTC UP/DOWN events", count=len(btc_hourly_events))
             else:
-                logger.warning("No hourly BTC UP/DOWN events found - checking all titles")
-                for e in events[:10]:
-                    logger.debug("Event", title=e.get("title", "")[:60], slug=e.get("slug", ""))
+                logger.warning("No hourly BTC UP/DOWN events found")
+                # Log some events to help debug
+                btc_any = [e for e in events if "bitcoin" in e.get("slug", "").lower()]
+                logger.info("All bitcoin events found", count=len(btc_any))
+                for e in btc_any[:5]:
+                    logger.info("Bitcoin event", slug=e.get("slug"), title=e.get("title", "")[:50])
 
             return btc_hourly_events
 
