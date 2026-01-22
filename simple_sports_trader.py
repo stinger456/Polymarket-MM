@@ -18,7 +18,7 @@ from py_clob_client.order_builder.constants import BUY
 PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
 FUNDER = os.getenv("POLY_SAFE_ADDRESS", "")
 SIG_TYPE = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
-ORDER_SIZE = 5  # $5 worth per side
+ORDER_SIZE = 5
 
 async def get_markets():
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -27,11 +27,31 @@ async def get_markets():
             params={"active": "true", "closed": "false", "limit": 200})
         events = resp.json()
 
+    # Debug: show what we got
+    print(f"API returned {len(events)} events")
+
+    # Show first 5 event titles
+    print("Sample events:")
+    for e in events[:5]:
+        print(f"  - {e.get('title', 'NO TITLE')[:60]}")
+    print()
+
     markets = []
+    # Sports keywords - look for ANY of these
+    sports_words = ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball",
+                    "hockey", "baseball", "ufc", "boxing", "tennis", "golf",
+                    "lakers", "celtics", "chiefs", "eagles", "yankees", "dodgers",
+                    "warriors", "bulls", "heat", "knicks", "nets", "mavs",
+                    "game", "match", "win", "beat"]
+
     for event in events:
-        title = event.get("title", "")
-        if " vs " not in title.lower():
+        title = event.get("title", "").lower()
+
+        # Check if ANY sports word is in title
+        is_sports = any(word in title for word in sports_words)
+        if not is_sports:
             continue
+
         for m in event.get("markets", []):
             tokens = m.get("clobTokenIds", [])
             if len(tokens) >= 2:
@@ -40,7 +60,7 @@ async def get_markets():
                     outcomes = eval(m.get("outcomes", "[]"))
                     if len(prices) >= 2:
                         markets.append({
-                            "title": title,
+                            "title": event.get("title", ""),
                             "yes_token": tokens[0],
                             "no_token": tokens[1],
                             "yes_price": prices[0],
@@ -66,10 +86,41 @@ async def main():
     print("\n=== SPORTS MARKET MAKER ===\n")
 
     markets = await get_markets()
-    print(f"Found {len(markets)} sports games\n")
+    print(f"Found {len(markets)} sports markets\n")
 
     if not markets:
-        print("No games found!")
+        print("No sports markets found!")
+        print("\nLet's try trading ANY market instead...")
+        # Fallback: get ANY market
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+            resp = await client.get("https://gamma-api.polymarket.com/events",
+                params={"active": "true", "closed": "false", "limit": 50})
+            events = resp.json()
+
+        for event in events[:20]:
+            for m in event.get("markets", []):
+                tokens = m.get("clobTokenIds", [])
+                if len(tokens) >= 2:
+                    try:
+                        prices = [float(p) for p in eval(m.get("outcomePrices", "[]"))]
+                        outcomes = eval(m.get("outcomes", "[]"))
+                        if len(prices) >= 2 and prices[0] > 0.1 and prices[0] < 0.9:
+                            markets.append({
+                                "title": event.get("title", ""),
+                                "yes_token": tokens[0],
+                                "no_token": tokens[1],
+                                "yes_price": prices[0],
+                                "no_price": prices[1],
+                                "team1": outcomes[0] if outcomes else "YES",
+                                "team2": outcomes[1] if len(outcomes) > 1 else "NO",
+                            })
+                    except:
+                        pass
+        print(f"Found {len(markets)} total markets\n")
+
+    if not markets:
+        print("Still no markets! Check Polymarket directly.")
         return
 
     client = ClobClient("https://clob.polymarket.com", key=PRIVATE_KEY,
@@ -78,14 +129,13 @@ async def main():
     print("Connected to Polymarket\n")
 
     count = 0
-    for m in markets[:10]:  # First 10 games
-        # Bid 5 cents below current price
+    for m in markets[:10]:
         yes_bid = max(0.01, round(m["yes_price"] - 0.05, 2))
         no_bid = max(0.01, round(m["no_price"] - 0.05, 2))
 
         print(f"{m['title'][:50]}...")
-        print(f"  {m['team1']}: ${m['yes_price']:.2f} -> bidding ${yes_bid:.2f}")
-        print(f"  {m['team2']}: ${m['no_price']:.2f} -> bidding ${no_bid:.2f}")
+        print(f"  {m['team1']}: ${m['yes_price']:.2f} -> bid ${yes_bid:.2f}")
+        print(f"  {m['team2']}: ${m['no_price']:.2f} -> bid ${no_bid:.2f}")
 
         o1 = place_order(client, m["yes_token"], yes_bid, ORDER_SIZE)
         if o1: print(f"  YES ORDER: {o1[:16]}...")
