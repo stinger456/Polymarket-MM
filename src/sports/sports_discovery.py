@@ -184,12 +184,13 @@ def _detect_market_type(question: str) -> str:
     """Detect market type from question."""
     question_lower = question.lower()
 
+    # Check spread first (contains "by more than" which could also have "win")
+    if any(x in question_lower for x in ["spread", "cover", "by more than", "by at least"]):
+        return "spread"
+    if any(x in question_lower for x in ["over/under", "total", "combined"]):
+        return "over_under"
     if any(x in question_lower for x in ["winner", "win", "moneyline", "to beat"]):
         return "moneyline"
-    if any(x in question_lower for x in ["spread", "cover", "by more than"]):
-        return "spread"
-    if any(x in question_lower for x in ["over/under", "total", "combined", "over", "under"]):
-        return "over_under"
 
     return "moneyline"
 

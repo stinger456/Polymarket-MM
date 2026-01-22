@@ -137,7 +137,7 @@ class TestQuoteEngine:
 
         # Positive edge
         edge = quote_engine.calculate_edge(0.48, 0.48)
-        assert edge == 0.04  # 1 - 0.96 = 0.04
+        assert abs(edge - 0.04) < 0.001  # 1 - 0.96 = 0.04 (with floating point tolerance)
 
     def test_generate_quotes_no_edge(self, market, quote_engine):
         """Test no quotes when no edge."""
