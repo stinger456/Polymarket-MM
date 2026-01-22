@@ -259,6 +259,10 @@ class OrderManager:
 
         Cancels orders that don't match quotes and places new ones.
 
+        IMPORTANT: Only places BUY orders for both YES and NO tokens.
+        You cannot SELL tokens you don't own on Polymarket.
+        Market making works by: BUY YES + BUY NO = hedged position.
+
         Args:
             quotes: New quote set to implement
 
@@ -272,7 +276,7 @@ class OrderManager:
             if self.cancel_order(order.order_id):
                 result["cancelled"].append(order.order_id)
 
-        # Place YES bids
+        # Place YES bids (BUY YES tokens)
         for quote in quotes.yes_bids:
             order_id = self.place_order(
                 token_id=self.yes_token_id,
@@ -283,18 +287,11 @@ class OrderManager:
             if order_id:
                 result["placed"].append(order_id)
 
-        # Place YES asks
-        for quote in quotes.yes_asks:
-            order_id = self.place_order(
-                token_id=self.yes_token_id,
-                side=OrderSide.SELL,
-                price=quote.price,
-                size=quote.size,
-            )
-            if order_id:
-                result["placed"].append(order_id)
+        # NOTE: Skipping YES asks - cannot SELL tokens we don't own
+        # for quote in quotes.yes_asks:
+        #     ...
 
-        # Place NO bids
+        # Place NO bids (BUY NO tokens)
         for quote in quotes.no_bids:
             order_id = self.place_order(
                 token_id=self.no_token_id,
@@ -305,21 +302,14 @@ class OrderManager:
             if order_id:
                 result["placed"].append(order_id)
 
-        # Place NO asks
-        for quote in quotes.no_asks:
-            order_id = self.place_order(
-                token_id=self.no_token_id,
-                side=OrderSide.SELL,
-                price=quote.price,
-                size=quote.size,
-            )
-            if order_id:
-                result["placed"].append(order_id)
+        # NOTE: Skipping NO asks - cannot SELL tokens we don't own
+        # for quote in quotes.no_asks:
+        #     ...
 
         logger.info(
             "Quotes updated",
-            placed=len(result["placed"]),
             cancelled=len(result["cancelled"]),
+            placed=len(result["placed"]),
         )
 
         return result
