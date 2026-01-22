@@ -303,7 +303,14 @@ def create_clob_client(config: Config):
     )
 
     # Set API credentials for authenticated endpoints
-    client.set_api_creds(client.create_or_derive_api_creds())
+    # IMPORTANT: Use create_api_key() to force fresh credentials
+    # derive_api_key() may return stale credentials from wrong signature_type
+    try:
+        creds = client.create_api_key()
+    except Exception:
+        # If create fails, try derive as fallback
+        creds = client.derive_api_key()
+    client.set_api_creds(creds)
 
     return client
 
