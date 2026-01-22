@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Market Maker - Brute force find working markets
+Market Maker - Trade LIVE sports markets from Gamma API
 """
 import os
 import time
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,83 +18,130 @@ FUNDER = os.getenv("POLY_SAFE_ADDRESS", "")
 SIG_TYPE = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
 ORDER_SIZE = 5
 
-def main():
-    print("\n=== MARKET MAKER ===\n")
+def get_live_sports_markets():
+    """Get live sports markets from Gamma API."""
+    headers = {"User-Agent": "Mozilla/5.0"}
 
+    # Fetch events tagged as sports
+    resp = httpx.get(
+        "https://gamma-api.polymarket.com/events",
+        params={"active": "true", "closed": "false", "limit": 100},
+        headers=headers,
+        timeout=30.0
+    )
+    events = resp.json()
+
+    print(f"Gamma API returned {len(events)} events")
+
+    # Find sports events
+    sports_keywords = ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball",
+                       "hockey", "baseball", "ufc", "boxing", "tennis",
+                       "lakers", "celtics", "chiefs", "eagles", "yankees", "warriors",
+                       "bulls", "heat", "knicks", "nets", "mavs", "nuggets", "bucks",
+                       "pistons", "wizards", "rockets", "spurs", "suns", "grizzlies",
+                       "cavaliers", "magic", "pacers", "hornets", "hawks", "raptors",
+                       "76ers", "clippers", "kings", "blazers", "jazz", "pelicans",
+                       "timberwolves", "thunder", "vs", "game", "match", "win"]
+
+    markets = []
+    for event in events:
+        title = event.get("title", "").lower()
+
+        # Check if sports related
+        if not any(kw in title for kw in sports_keywords):
+            continue
+
+        for m in event.get("markets", []):
+            clob_ids = m.get("clobTokenIds", [])
+            if len(clob_ids) < 2:
+                continue
+
+            try:
+                prices = [float(p) for p in eval(str(m.get("outcomePrices", "[]")))]
+                outcomes = eval(str(m.get("outcomes", "[]")))
+            except:
+                continue
+
+            if len(prices) < 2 or len(outcomes) < 2:
+                continue
+
+            markets.append({
+                "title": event.get("title", ""),
+                "question": m.get("question", ""),
+                "condition_id": m.get("conditionId", ""),
+                "yes_token": clob_ids[0],
+                "no_token": clob_ids[1],
+                "yes_price": prices[0],
+                "no_price": prices[1],
+                "outcome1": outcomes[0],
+                "outcome2": outcomes[1],
+                "active": m.get("active", False),
+            })
+
+    return markets
+
+def main():
+    print("\n=== LIVE SPORTS MARKET MAKER ===\n")
+
+    # Get sports markets from Gamma
+    print("Fetching sports markets from Gamma API...")
+    gamma_markets = get_live_sports_markets()
+    print(f"Found {len(gamma_markets)} sports markets\n")
+
+    if gamma_markets:
+        print("Sports markets found:")
+        for m in gamma_markets[:10]:
+            print(f"  - {m['title'][:50]}")
+            print(f"    {m['outcome1']}: ${m['yes_price']:.2f} | {m['outcome2']}: ${m['no_price']:.2f}")
+        print()
+
+    # Connect to CLOB
     client = ClobClient("https://clob.polymarket.com", key=PRIVATE_KEY,
                         chain_id=137, signature_type=SIG_TYPE, funder=FUNDER)
     client.set_api_creds(client.create_or_derive_api_creds())
-    print("Connected!\n")
+    print("Connected to CLOB!\n")
 
-    # Get ALL markets
-    print("Fetching ALL markets...")
-    resp = client.get_simplified_markets()
-    all_markets = resp.get("data", []) if isinstance(resp, dict) else []
-    print(f"Total markets: {len(all_markets)}\n")
-
-    # Try to find markets with ACTUAL orderbooks by checking
-    print("Scanning for markets with active orderbooks...")
-    working_markets = []
-
-    for i, m in enumerate(all_markets):
-        tokens = m.get("tokens", [])
-        if len(tokens) < 2:
-            continue
-
-        token_id = tokens[0].get("token_id")
-        if not token_id:
-            continue
-
-        # Try to get orderbook - this tells us if market is actually active
-        try:
-            book = client.get_order_book(token_id)
-            # Check if it has ANY orders (bids or asks)
-            if book and (book.get("bids") or book.get("asks")):
-                working_markets.append(m)
-                if len(working_markets) >= 20:  # Found enough
-                    break
-        except:
-            pass  # No orderbook, skip
-
-        if i % 100 == 0:
-            print(f"  Scanned {i}/{len(all_markets)}, found {len(working_markets)} active...")
-
-    print(f"\nFound {len(working_markets)} markets with active orderbooks!\n")
-
-    if not working_markets:
-        print("No markets with orderbooks found!")
-        return
-
-    # Now place orders on working markets
+    # For each Gamma market, try to find matching CLOB market by condition_id
+    print("Placing orders on sports markets...\n")
     count = 0
-    for m in working_markets:
-        question = m.get("question", "")[:50]
-        tokens = m.get("tokens", [])
 
-        t1, t2 = tokens[0], tokens[1]
-        token1_id = t1.get("token_id")
-        token2_id = t2.get("token_id")
-        price1 = float(t1.get("price", 0.5))
-        price2 = float(t2.get("price", 0.5))
-        outcome1 = t1.get("outcome", "Yes")
-        outcome2 = t2.get("outcome", "No")
+    for m in gamma_markets[:15]:
+        title = m["title"][:45]
+        yes_token = m["yes_token"]
+        no_token = m["no_token"]
+        yes_price = m["yes_price"]
+        no_price = m["no_price"]
 
         # Skip extreme prices
-        if price1 < 0.1 or price1 > 0.9:
+        if yes_price < 0.1 or yes_price > 0.9:
             continue
 
-        bid1 = max(0.01, round(price1 - 0.05, 2))
-        bid2 = max(0.01, round(price2 - 0.05, 2))
+        bid1 = max(0.01, round(yes_price - 0.05, 2))
+        bid2 = max(0.01, round(no_price - 0.05, 2))
 
-        print(f"{question}...")
-        print(f"  {outcome1}: ${price1:.2f} -> bid ${bid1:.2f}")
-        print(f"  {outcome2}: ${price2:.2f} -> bid ${bid2:.2f}")
+        print(f"{title}...")
+        print(f"  {m['outcome1']}: ${yes_price:.2f} -> bid ${bid1:.2f}")
+        print(f"  {m['outcome2']}: ${no_price:.2f} -> bid ${bid2:.2f}")
+
+        # First verify this market exists in CLOB by getting orderbook
+        try:
+            book = client.get_order_book(yes_token)
+            has_book = book and (book.get("bids") or book.get("asks"))
+        except Exception as e:
+            print(f"  No CLOB orderbook: {str(e)[:40]}")
+            print()
+            continue
+
+        if not has_book:
+            print(f"  Empty orderbook, skipping")
+            print()
+            continue
 
         oid1 = None
         oid2 = None
 
         try:
-            order1 = OrderArgs(token_id=token1_id, price=bid1, size=ORDER_SIZE, side=BUY)
+            order1 = OrderArgs(token_id=yes_token, price=bid1, size=ORDER_SIZE, side=BUY)
             signed1 = client.create_order(order1)
             resp1 = client.post_order(signed1, OrderType.GTC)
             oid1 = resp1.get("orderID")
@@ -103,7 +151,7 @@ def main():
             print(f"  Error 1: {str(e)[:50]}")
 
         try:
-            order2 = OrderArgs(token_id=token2_id, price=bid2, size=ORDER_SIZE, side=BUY)
+            order2 = OrderArgs(token_id=no_token, price=bid2, size=ORDER_SIZE, side=BUY)
             signed2 = client.create_order(order2)
             resp2 = client.post_order(signed2, OrderType.GTC)
             oid2 = resp2.get("orderID")
