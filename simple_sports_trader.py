@@ -33,18 +33,12 @@ def main():
     all_markets = resp.get("data", []) if isinstance(resp, dict) else []
     print(f"Found {len(all_markets)} total markets")
 
-    # Debug: show first market structure
-    if all_markets:
-        m = all_markets[0]
-        print(f"\nSample market keys: {list(m.keys())}")
-        print(f"  active={m.get('active')} (type={type(m.get('active'))})")
-        print(f"  closed={m.get('closed')} (type={type(m.get('closed'))})")
-        print(f"  enable_order_book={m.get('enable_order_book')}")
-        print(f"  accepting_orders={m.get('accepting_orders')}")
-
-    # Just use all markets that have tokens - skip the active filter for now
-    markets = [m for m in all_markets if m.get("tokens") and len(m.get("tokens", [])) >= 2]
-    print(f"\nMarkets with tokens: {len(markets)}\n")
+    # Filter for markets ACCEPTING ORDERS (the key field!)
+    markets = [m for m in all_markets
+               if m.get("accepting_orders") == True
+               and m.get("tokens")
+               and len(m.get("tokens", [])) >= 2]
+    print(f"Markets accepting orders: {len(markets)}\n")
 
     if not markets:
         print("No active markets!")
@@ -52,7 +46,7 @@ def main():
 
     count = 0
     skipped = 0
-    for m in markets[:30]:  # Try more markets since some may fail
+    for m in markets[:50]:  # Try more markets
         question = m.get("question", "")[:50]
         tokens = m.get("tokens", [])
 
@@ -77,18 +71,6 @@ def main():
         # Bid 5 cents below
         bid1 = max(0.01, round(price1 - 0.05, 2))
         bid2 = max(0.01, round(price2 - 0.05, 2))
-
-        # First check if orderbook exists
-        try:
-            book = client.get_order_book(token1_id)
-            if not book or (not book.get("bids") and not book.get("asks")):
-                skipped += 1
-                continue
-        except Exception as e:
-            if "does not exist" in str(e):
-                skipped += 1
-                continue
-            # Other error, try anyway
 
         print(f"{question}...")
         print(f"  {outcome1}: ${price1:.2f} -> bid ${bid1:.2f}")
