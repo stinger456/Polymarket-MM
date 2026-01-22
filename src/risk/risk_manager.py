@@ -23,7 +23,7 @@ class RiskLimits:
     max_total_exposure: float = 5000.0
     max_drawdown_pct: float = 10.0
     max_inventory_skew: float = 0.6
-    min_time_remaining: int = 300
+    min_time_remaining: int = 60  # Allow trading until 1 minute before expiry
     max_trades_per_minute: int = 30
 
 

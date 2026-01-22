@@ -165,7 +165,7 @@ class Config(BaseSettings):
     # Risk parameters from env
     max_drawdown_pct: float = Field(default=10.0, alias="MAX_DRAWDOWN_PCT")
     max_inventory_skew: float = Field(default=0.6, alias="MAX_INVENTORY_SKEW")
-    min_time_remaining: int = Field(default=300, alias="MIN_TIME_REMAINING")
+    min_time_remaining: int = Field(default=60, alias="MIN_TIME_REMAINING")
     max_trades_per_minute: int = Field(default=30, alias="MAX_TRADES_PER_MINUTE")
 
     # Nested configs (populated from YAML)
