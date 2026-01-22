@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Simple Sports Trader - Actually places orders on Polymarket sports markets.
+Simple Sports Market Maker - Places orders on BOTH sides of sports markets.
+
+Strategy:
+- Find sports markets (games with "vs")
+- Place BUY orders on BOTH YES and NO at prices below market
+- If both fill: YES + NO = $1.00 payout, we paid less = PROFIT
 """
 import os
 import sys
 import asyncio
+import time
 import httpx
 from dotenv import load_dotenv
 
@@ -14,38 +20,31 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
-# Config from .env
+# Config
 PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
 FUNDER = os.getenv("POLY_SAFE_ADDRESS", "")
 SIG_TYPE = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
-ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))  # $5 per order
-MIN_EDGE = float(os.getenv("MIN_EDGE_THRESHOLD", "0.02"))  # 2% minimum edge
+ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))  # Shares per side
+SPREAD = 0.03  # How far below market to bid (3%)
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
 
 
 async def fetch_sports_markets():
-    """Fetch active sports markets."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json",
-    }
+    """Fetch active sports markets with 'vs' in title."""
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
     async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
         resp = await client.get(f"{GAMMA_URL}/events", params={
-            "active": "true",
-            "closed": "false",
-            "limit": 100,
+            "active": "true", "closed": "false", "limit": 200,
         })
         events = resp.json()
 
-    # Find sports events
-    sports_keywords = ["vs", "NBA", "NFL", "MLB", "NHL", "soccer", "UFC", "boxing"]
     markets = []
-
     for event in events:
-        title = event.get("title", "").lower()
-        if not any(kw.lower() in title for kw in sports_keywords):
+        title = event.get("title", "")
+        # Only "vs" games (actual sports matchups)
+        if " vs " not in title.lower() and " vs. " not in title.lower():
             continue
 
         for market in event.get("markets", []):
@@ -61,7 +60,8 @@ async def fetch_sports_markets():
 
             if len(outcomes) >= 2 and len(prices) >= 2:
                 markets.append({
-                    "question": market.get("question", event.get("title", "")),
+                    "title": title,
+                    "question": market.get("question", title),
                     "yes_token": clob_ids[0],
                     "no_token": clob_ids[1],
                     "yes_price": prices[0],
@@ -85,43 +85,35 @@ def create_client():
         signature_type=SIG_TYPE,
         funder=FUNDER,
     )
-
-    # Set API credentials
     creds = client.create_or_derive_api_creds()
     client.set_api_creds(creds)
-
     return client
 
 
 def place_order(client, token_id, price, size):
-    """Place a limit order."""
+    """Place a BUY limit order."""
     try:
-        order = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=BUY,
-        )
+        order = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
         signed = client.create_order(order)
         resp = client.post_order(signed, OrderType.GTC)
         return resp.get("orderID")
     except Exception as e:
-        print(f"  Order failed: {e}")
+        print(f"    ERROR: {e}")
         return None
 
 
 async def main():
     print("=" * 60)
-    print("   SIMPLE SPORTS TRADER")
+    print("   SPORTS MARKET MAKER")
     print("=" * 60)
-    print(f"Order size: ${ORDER_SIZE}")
-    print(f"Min edge: {MIN_EDGE:.1%}")
+    print(f"Order size: {ORDER_SIZE} shares per side")
+    print(f"Spread: {SPREAD:.1%} below market")
     print()
 
     # Fetch markets
-    print("Fetching sports markets...")
+    print("Fetching sports 'vs' markets...")
     markets = await fetch_sports_markets()
-    print(f"Found {len(markets)} sports markets")
+    print(f"Found {len(markets)} sports matchups")
     print()
 
     if not markets:
@@ -134,56 +126,67 @@ async def main():
     print("Connected!")
     print()
 
-    # Find markets with edge and place orders
     orders_placed = 0
+    markets_traded = 0
 
     for market in markets:
         yes_price = market["yes_price"]
         no_price = market["no_price"]
-        total = yes_price + no_price
 
-        # Check for edge (prices sum to less than $1)
-        edge = 1.0 - total
-        if edge < MIN_EDGE:
+        # Calculate our bid prices (below market)
+        yes_bid = round(yes_price * (1 - SPREAD), 2)
+        no_bid = round(no_price * (1 - SPREAD), 2)
+
+        # Minimum price is $0.01
+        yes_bid = max(0.01, yes_bid)
+        no_bid = max(0.01, no_bid)
+
+        # Check if we'd profit: our cost < $1.00
+        total_cost = yes_bid + no_bid
+        if total_cost >= 0.98:  # Need at least 2% margin
             continue
 
-        print(f"Found edge: {market['question'][:50]}...")
-        print(f"  {market['outcomes'][0]}: ${yes_price:.3f}")
-        print(f"  {market['outcomes'][1]}: ${no_price:.3f}")
-        print(f"  Total: ${total:.3f} | Edge: {edge:.2%}")
+        profit_if_both_fill = 1.00 - total_cost
 
-        # Calculate bid prices (slightly below current)
-        yes_bid = round(yes_price - 0.01, 2)
-        no_bid = round(no_price - 0.01, 2)
+        print(f"MARKET: {market['title'][:55]}...")
+        print(f"  {market['outcomes'][0]}: market ${yes_price:.2f} -> bid ${yes_bid:.2f}")
+        print(f"  {market['outcomes'][1]}: market ${no_price:.2f} -> bid ${no_bid:.2f}")
+        print(f"  If both fill: ${total_cost:.2f} cost -> $1.00 = ${profit_if_both_fill:.2f} profit ({profit_if_both_fill/total_cost*100:.1f}%)")
 
-        # Make sure bids still have edge
-        if yes_bid + no_bid >= 0.98:
-            yes_bid = round((0.98 - edge/2) * yes_price / total, 2)
-            no_bid = round((0.98 - edge/2) * no_price / total, 2)
-
-        print(f"  Placing bids: YES @ ${yes_bid:.2f}, NO @ ${no_bid:.2f}")
-
-        # Place orders
+        # Place YES order
+        print(f"  Placing YES bid @ ${yes_bid:.2f}...")
         yes_order = place_order(client, market["yes_token"], yes_bid, ORDER_SIZE)
         if yes_order:
-            print(f"  YES order placed: {yes_order}")
+            print(f"    ORDER PLACED: {yes_order[:20]}...")
             orders_placed += 1
 
+        # Place NO order
+        print(f"  Placing NO bid @ ${no_bid:.2f}...")
         no_order = place_order(client, market["no_token"], no_bid, ORDER_SIZE)
         if no_order:
-            print(f"  NO order placed: {no_order}")
+            print(f"    ORDER PLACED: {no_order[:20]}...")
             orders_placed += 1
+
+        if yes_order or no_order:
+            markets_traded += 1
 
         print()
 
-        # Limit orders per run
-        if orders_placed >= 10:
-            print("Reached order limit for this run")
+        # Rate limit
+        time.sleep(0.5)
+
+        # Limit per run
+        if markets_traded >= 5:
+            print("Reached 5 markets for this run")
             break
 
     print("=" * 60)
+    print(f"Markets traded: {markets_traded}")
     print(f"Total orders placed: {orders_placed}")
     print("=" * 60)
+    print()
+    print("Orders are now LIVE on Polymarket!")
+    print("Check your positions at: https://polymarket.com/portfolio")
 
 
 if __name__ == "__main__":
