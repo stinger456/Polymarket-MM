@@ -106,8 +106,25 @@ class SportMarket:
     def is_upcoming(self) -> bool:
         """Check if game hasn't started yet."""
         if not self.game_start_time:
-            return True  # Unknown start time, assume upcoming
-        return self.game_start_time > datetime.now(self.game_start_time.tzinfo)
+            return False  # Unknown start time, skip
+        now = datetime.now(self.game_start_time.tzinfo)
+        return self.game_start_time > now
+
+    @property
+    def is_today(self) -> bool:
+        """Check if game is scheduled for today."""
+        if not self.game_start_time:
+            return False
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        game_date = self.game_start_time.date()
+        today = now.date()
+        return game_date == today
+
+    @property
+    def is_tradeable(self) -> bool:
+        """Check if game is today AND hasn't started yet - ready to trade."""
+        return self.is_today and self.is_upcoming
 
 
 def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:

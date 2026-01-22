@@ -145,18 +145,24 @@ class SportsMarketMaker:
             # Get all sports markets
             markets = await get_all_sports_markets()
 
-            # Filter to tradeable markets
+            # Filter to TODAY's games only (not started yet)
             tradeable = []
             for market in markets:
                 # Skip if no token IDs
                 if not market.yes_token_id or not market.no_token_id:
                     continue
 
-                # Skip if game has started
-                if not market.is_upcoming:
+                # Only trade TODAY's games that haven't started
+                if not market.is_tradeable:
                     continue
 
                 tradeable.append(market)
+
+            logger.info(
+                "todays_games_found",
+                total_fetched=len(markets),
+                todays_games=len(tradeable),
+            )
 
             # Update market dict
             old_markets = set(self.markets.keys())
