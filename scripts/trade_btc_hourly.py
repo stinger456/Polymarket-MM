@@ -1,246 +1,239 @@
 #!/usr/bin/env python3
 """
-Simple BTC Hourly Market Maker - Trades ONE specific event.
-
-Usage:
-    python scripts/trade_btc_hourly.py bitcoin-up-or-down-january-21-8pm-et
+Simple BTC Hourly Market Maker - DIRECT TRADING
+No complex discovery - just finds current hour's market and trades it.
 """
 
-import asyncio
-import sys
 import os
-from datetime import datetime, timezone
+import sys
 import json
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Tuple
 
-# Add parent to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import httpx
 from dotenv import load_dotenv
-
 load_dotenv()
 
-GAMMA_URL = "https://gamma-api.polymarket.com"
+import httpx
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
+from py_clob_client.order_builder.constants import BUY
 
 
-async def get_event_markets(slug: str):
-    """Get all markets from a specific event slug."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        print(f"\nFetching event: {slug}")
-        print("=" * 70)
+def get_current_hour_slug() -> str:
+    """Generate the slug for current hour's BTC market."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
 
-        response = await client.get(
-            f"{GAMMA_URL}/events",
+    month = now.strftime("%B").lower()
+    day = now.day
+    hour = now.hour
+
+    if hour == 0:
+        hour_str = "12am"
+    elif hour < 12:
+        hour_str = f"{hour}am"
+    elif hour == 12:
+        hour_str = "12pm"
+    else:
+        hour_str = f"{hour - 12}pm"
+
+    slug = f"bitcoin-up-or-down-{month}-{day}-{hour_str}-et"
+    return slug
+
+
+def fetch_event_by_slug(slug: str) -> Optional[dict]:
+    """Fetch event directly by slug."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+
+    with httpx.Client(headers=headers, timeout=30) as client:
+        resp = client.get(
+            "https://gamma-api.polymarket.com/events",
             params={"slug": slug}
         )
-        response.raise_for_status()
-        events = response.json()
-
-        if not events:
-            print(f"ERROR: Event '{slug}' not found!")
-            print("\nSearching for similar events...")
-
-            # Search for any bitcoin events
-            response2 = await client.get(
-                f"{GAMMA_URL}/events",
-                params={"active": "true", "closed": "false", "limit": 50}
-            )
-            all_events = response2.json()
-
-            print(f"\nFound {len(all_events)} active events. BTC-related:")
-            for e in all_events:
-                title = e.get("title", "").lower()
-                if "bitcoin" in title or "btc" in title:
-                    print(f"  - {e.get('title')}")
-                    print(f"    slug: {e.get('slug')}")
-            return None
-
-        event = events[0]
-        print(f"Event: {event.get('title')}")
-        print(f"Total Markets in event: {len(event.get('markets', []))}")
-        print("=" * 70)
-
-        # Debug: print raw first market
-        markets = event.get("markets", [])
-        if markets:
-            print("\nRAW FIRST MARKET DATA:")
-            print(json.dumps(markets[0], indent=2, default=str)[:2000])
-            print("=" * 70)
-
-        return event
+        events = resp.json()
+        if events:
+            return events[0]
+    return None
 
 
-def parse_markets(event: dict):
-    """Parse tradeable markets from event."""
-    markets = []
-    now = datetime.now(timezone.utc)
+def get_market_tokens(event: dict) -> Optional[Tuple[str, str, str]]:
+    """Extract YES and NO token IDs from event."""
+    markets = event.get("markets", [])
 
-    print(f"\nCurrent UTC time: {now.isoformat()}")
-    print(f"Parsing {len(event.get('markets', []))} markets...\n")
-
-    for i, m in enumerate(event.get("markets", [])):
-        question = m.get("question", "")
-        condition_id = m.get("conditionId", "")
-        clob_tokens = m.get("clobTokenIds", [])
-        end_date_str = m.get("endDate", "")
-        closed = m.get("closed", False)
-        active = m.get("active", True)
-
-        print(f"\nMarket {i+1}: {question[:60]}")
-        print(f"  closed={closed}, active={active}")
-        print(f"  endDate={end_date_str}")
-        print(f"  clobTokenIds={len(clob_tokens)} tokens")
-
-        # Parse end time
-        end_time = None
-        if end_date_str:
-            try:
-                if end_date_str.endswith("Z"):
-                    end_date_str = end_date_str[:-1] + "+00:00"
-                end_time = datetime.fromisoformat(end_date_str)
-                print(f"  Parsed end_time: {end_time.isoformat()}")
-            except Exception as e:
-                print(f"  Failed to parse end time: {e}")
-
-        # Check if tradeable
-        if closed:
-            print(f"  -> SKIPPED: Market is closed")
+    for market in markets:
+        if market.get("closed"):
             continue
 
-        if not end_time:
-            print(f"  -> SKIPPED: No end time")
-            continue
+        question = market.get("question", "")
+        tokens = market.get("clobTokenIds", [])
 
-        time_diff = (end_time - now).total_seconds()
-        if time_diff <= 0:
-            print(f"  -> SKIPPED: Expired ({time_diff/60:.1f} minutes ago)")
-            continue
+        if isinstance(tokens, str):
+            tokens = json.loads(tokens)
 
-        if len(clob_tokens) < 2:
-            print(f"  -> SKIPPED: Not enough tokens ({len(clob_tokens)})")
-            continue
-
-        # This market is tradeable!
-        minutes_left = time_diff / 60
-        markets.append({
-            "question": question,
-            "condition_id": condition_id,
-            "yes_token": clob_tokens[0],
-            "no_token": clob_tokens[1],
-            "end_time": end_time,
-            "minutes_left": minutes_left,
-        })
-
-        print(f"  -> TRADEABLE! {minutes_left:.1f} minutes left")
-        print(f"     YES: {clob_tokens[0][:50]}...")
-        print(f"     NO:  {clob_tokens[1][:50]}...")
-
-    return markets
+        if len(tokens) >= 2:
+            return tokens[0], tokens[1], question
+    return None
 
 
-async def find_current_btc_event():
-    """Find the current active BTC UP/DOWN event automatically."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        print("\n" + "=" * 70)
-        print("SEARCHING FOR ACTIVE BTC UP/DOWN EVENTS...")
-        print("=" * 70)
+def create_client() -> ClobClient:
+    """Create authenticated CLOB client."""
+    private_key = os.getenv("POLY_PRIVATE_KEY", "")
+    safe_address = os.getenv("POLY_SAFE_ADDRESS", "")
+    sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
 
-        response = await client.get(
-            f"{GAMMA_URL}/events",
-            params={"active": "true", "closed": "false", "limit": 100}
+    client = ClobClient(
+        "https://clob.polymarket.com",
+        key=private_key,
+        chain_id=137,
+        signature_type=sig_type,
+        funder=safe_address,
+    )
+
+    try:
+        creds = client.create_api_key()
+    except:
+        creds = client.derive_api_key()
+    client.set_api_creds(creds)
+    return client
+
+
+def place_order(client: ClobClient, token_id: str, price: float, size: float) -> Optional[str]:
+    """Place a BUY order with neg_risk=True."""
+    try:
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=BUY,
         )
-        events = response.json()
-        now = datetime.now(timezone.utc)
-
-        active_events = []
-        for event in events:
-            title = event.get("title", "").lower()
-            slug = event.get("slug", "")
-
-            # Match Bitcoin UP/DOWN events
-            if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
-                # Check for active markets
-                for m in event.get("markets", []):
-                    end_str = m.get("endDate", "")
-                    closed = m.get("closed", False)
-                    if end_str and not closed:
-                        try:
-                            if end_str.endswith("Z"):
-                                end_str = end_str[:-1] + "+00:00"
-                            end_time = datetime.fromisoformat(end_str)
-                            mins_left = (end_time - now).total_seconds() / 60
-                            if mins_left > 0:
-                                active_events.append({
-                                    "title": event.get("title"),
-                                    "slug": slug,
-                                    "end_time": end_time,
-                                    "minutes_left": mins_left,
-                                    "event": event
-                                })
-                                break
-                        except:
-                            pass
-
-        if active_events:
-            active_events.sort(key=lambda x: x["end_time"])
-            print(f"\nFound {len(active_events)} active BTC UP/DOWN event(s):\n")
-            for i, e in enumerate(active_events[:5]):
-                print(f"  {i+1}. {e['title']}")
-                print(f"     slug: {e['slug']}")
-                print(f"     expires in: {e['minutes_left']:.1f} minutes")
-            return active_events[0]
+        options = PartialCreateOrderOptions(neg_risk=True)
+        signed = client.create_order(order_args, options)
+        resp = client.post_order(signed, OrderType.GTC)
+        return resp.get("orderID") or resp.get("id")
+    except Exception as e:
+        print(f"Order failed: {e}")
         return None
 
 
-async def main():
-    if len(sys.argv) >= 2:
-        slug = sys.argv[1]
-        print(f"Using provided slug: {slug}")
-        event = await get_event_markets(slug)
-    else:
-        # Auto-find current active event
-        result = await find_current_btc_event()
-        if result:
-            event = result["event"]
-            slug = result["slug"]
-            print(f"\nUsing: {slug}")
-        else:
-            print("\nNo active BTC UP/DOWN events found!")
-            print("Check https://polymarket.com for current events.")
-            return
+def main():
+    print("=" * 60)
+    print("BTC HOURLY MARKET MAKER - DIRECT TRADING")
+    print("=" * 60)
+
+    slug = get_current_hour_slug()
+    print(f"\nLooking for: {slug}")
+
+    event = fetch_event_by_slug(slug)
 
     if not event:
+        print(f"Current hour not found, trying next hour...")
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        next_hour = datetime.now(et) + timedelta(hours=1)
+        month = next_hour.strftime("%B").lower()
+        day = next_hour.day
+        hour = next_hour.hour
+        if hour == 0:
+            hour_str = "12am"
+        elif hour < 12:
+            hour_str = f"{hour}am"
+        elif hour == 12:
+            hour_str = "12pm"
+        else:
+            hour_str = f"{hour - 12}pm"
+        slug = f"bitcoin-up-or-down-{month}-{day}-{hour_str}-et"
+        print(f"Trying: {slug}")
+        event = fetch_event_by_slug(slug)
+
+    if not event:
+        print("\n❌ No active BTC hourly market found!")
         return
 
-    print("\nParsing markets...")
-    markets = parse_markets(event)
+    print(f"\n✅ Found: {event.get('title')}")
 
-    print("\n" + "=" * 70)
-    print(f"FOUND {len(markets)} TRADEABLE MARKET(S)")
-    print("=" * 70)
-
-    if not markets:
-        print("\nNo tradeable markets in this event (may have just expired).")
-        print("\nSearching for next active event...")
-        result = await find_current_btc_event()
-        if result:
-            print(f"\nTry running:")
-            print(f"  python scripts/trade_btc_hourly.py {result['slug']}")
+    result = get_market_tokens(event)
+    if not result:
+        print("❌ No open markets found")
         return
 
-    # Show the market to trade
-    markets.sort(key=lambda x: x["end_time"])
-    next_market = markets[0]
+    yes_token, no_token, question = result
+    print(f"Market: {question}")
+    print(f"YES: {yes_token[:40]}...")
+    print(f"NO: {no_token[:40]}...")
 
-    print(f"\nMARKET TO TRADE:")
-    print(f"  {next_market['question']}")
-    print(f"  Minutes left: {next_market['minutes_left']:.1f}")
-    print(f"\nToken IDs:")
-    print(f"  YES: {next_market['yes_token']}")
-    print(f"  NO:  {next_market['no_token']}")
-    print(f"\nRun the bot:")
-    print(f"  python -m src.main --live --event {slug}")
+    print("\nConnecting...")
+    client = create_client()
+    print("✅ Connected!")
+
+    ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "10"))
+
+    print("\nFetching orderbook...")
+    try:
+        yes_book = client.get_order_book(yes_token)
+        no_book = client.get_order_book(no_token)
+        yes_best_bid = float(yes_book.bids[0].price) if yes_book.bids else 0.40
+        no_best_bid = float(no_book.bids[0].price) if no_book.bids else 0.40
+        print(f"YES best bid: {yes_best_bid:.2f}")
+        print(f"NO best bid: {no_best_bid:.2f}")
+        yes_bid_price = round(yes_best_bid - 0.01, 2)
+        no_bid_price = round(no_best_bid - 0.01, 2)
+    except Exception as e:
+        print(f"Orderbook error: {e}")
+        yes_bid_price = 0.45
+        no_bid_price = 0.45
+
+    if yes_bid_price + no_bid_price >= 0.98:
+        yes_bid_price = 0.48
+        no_bid_price = 0.48
+
+    print(f"\n{'='*60}")
+    print("PLACING ORDERS")
+    print(f"{'='*60}")
+    print(f"YES BUY: {ORDER_SIZE} @ ${yes_bid_price:.2f}")
+    print(f"NO BUY:  {ORDER_SIZE} @ ${no_bid_price:.2f}")
+    print(f"Total: ${yes_bid_price + no_bid_price:.2f} | Profit if filled: ${1 - yes_bid_price - no_bid_price:.2f}")
+
+    print("\nPlacing YES order...")
+    yes_order_id = place_order(client, yes_token, yes_bid_price, ORDER_SIZE)
+    if yes_order_id:
+        print(f"✅ YES: {yes_order_id}")
+    else:
+        print("❌ YES failed")
+
+    print("Placing NO order...")
+    no_order_id = place_order(client, no_token, no_bid_price, ORDER_SIZE)
+    if no_order_id:
+        print(f"✅ NO: {no_order_id}")
+    else:
+        print("❌ NO failed")
+
+    if yes_order_id or no_order_id:
+        print(f"\n{'='*60}")
+        print("ORDERS LIVE - Press Ctrl+C to cancel and exit")
+        print(f"{'='*60}")
+        try:
+            while True:
+                time.sleep(10)
+                orders = client.get_orders()
+                active = [o for o in (orders or []) if o.get("status") == "live"]
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Active: {len(active)}")
+        except KeyboardInterrupt:
+            print("\nCancelling...")
+            if yes_order_id:
+                try: client.cancel(yes_order_id)
+                except: pass
+            if no_order_id:
+                try: client.cancel(no_order_id)
+                except: pass
+            print("Done!")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
