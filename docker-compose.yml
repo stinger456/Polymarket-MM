@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: polymarket-mm
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+    restart: unless-stopped
+    environment:
+      - PAPER_TRADING=true
+    # Uncomment for live trading:
+    # command: ["python", "-m", "src.main", "--live"]
+
+  # Optional: Prometheus metrics endpoint
+  # Uncomment to enable monitoring
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: prometheus
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus_data:/prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   restart: unless-stopped
+
+  # Optional: Grafana dashboard
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: grafana
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
+  #   ports:
+  #     - "3000:3000"
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - prometheus
+
+# volumes:
+#   prometheus_data:
+#   grafana_data:

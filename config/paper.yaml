@@ -1,0 +1,26 @@
+# Paper trading configuration
+# More conservative settings for testing
+
+trading:
+  min_edge_threshold: 0.02
+  max_position_size: 100
+  max_total_exposure: 1000
+  num_quote_levels: 2
+  level_spacing: 0.01
+  quote_refresh_seconds: 5.0
+  base_order_size: 25
+
+risk:
+  max_drawdown_pct: 5
+  max_inventory_skew: 0.5
+  min_time_remaining: 600
+  max_trades_per_minute: 10
+
+pricing:
+  volatility_window: 50
+  volatility_scale: 1.0
+
+logging:
+  level: DEBUG
+  format: structured
+  file: logs/paper.log

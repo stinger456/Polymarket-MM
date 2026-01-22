@@ -1,0 +1,23 @@
+trading:
+  min_edge_threshold: 0.02
+  max_position_size: 500
+  max_total_exposure: 5000
+  num_quote_levels: 3
+  level_spacing: 0.01
+  quote_refresh_seconds: 2.0
+  base_order_size: 50
+
+risk:
+  max_drawdown_pct: 10
+  max_inventory_skew: 0.6
+  min_time_remaining: 300
+  max_trades_per_minute: 30
+
+pricing:
+  volatility_window: 100  # Number of price samples
+  volatility_scale: 1.0   # Multiplier for vol estimate
+
+logging:
+  level: INFO
+  format: structured
+  file: logs/bot.log
