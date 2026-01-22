@@ -112,22 +112,24 @@ def create_client() -> ClobClient:
         funder=safe_address,
     )
 
-    # Try derive first (doesn't create new key if one exists)
+    # Try create first for fresh credentials
     try:
-        print("  Deriving API key...")
-        creds = client.derive_api_key()
-        print(f"  ✅ Derived: {creds.api_key[:20]}...")
+        print("  Creating fresh API key...")
+        creds = client.create_api_key()
+        print(f"  ✅ Created: {creds.api_key[:20]}...")
     except Exception as e:
-        print(f"  derive_api_key failed: {e}")
+        print(f"  create_api_key failed: {e}, trying derive...")
         try:
-            print("  Creating new API key...")
-            creds = client.create_api_key()
-            print(f"  ✅ Created: {creds.api_key[:20]}...")
+            creds = client.derive_api_key()
+            print(f"  ✅ Derived: {creds.api_key[:20]}...")
         except Exception as e2:
-            print(f"  ❌ create_api_key failed: {e2}")
+            print(f"  ❌ derive_api_key failed: {e2}")
             raise
 
     client.set_api_creds(creds)
+
+    # Print client info for debugging
+    print(f"  Funder: {client.funder if hasattr(client, 'funder') else 'N/A'}")
     return client
 
 
