@@ -58,6 +58,12 @@ class SmartMarketMaker:
         self.client.set_api_creds(creds)
         print(f"✓ Connected: {safe_address[:20]}...")
 
+        # P&L Tracking
+        self.trade_log = []
+        self.total_pnl = 0.0
+        self.total_trades = 0
+        self.successful_trades = 0
+
     def get_markets(self) -> List[Dict]:
         """Get active BTC hourly markets."""
         markets = []
@@ -230,10 +236,46 @@ class SmartMarketMaker:
         try: self.client.cancel(order_id)
         except: pass
 
+    def log_trade(self, market: str, result: str, pnl: float, details: str):
+        """Log a trade for P&L tracking."""
+        trade = {
+            "time": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M:%S"),
+            "market": market,
+            "result": result,
+            "pnl": pnl,
+            "details": details,
+        }
+        self.trade_log.append(trade)
+        self.total_pnl += pnl
+        self.total_trades += 1
+        if result == "SUCCESS":
+            self.successful_trades += 1
+
+    def display_pnl_dashboard(self):
+        """Display P&L dashboard."""
+        print(f"\n{'='*60}")
+        print(f"📈 P&L DASHBOARD")
+        print(f"{'='*60}")
+        print(f"   Total Trades: {self.total_trades}")
+        print(f"   Successful:   {self.successful_trades}")
+        print(f"   Failed:       {self.total_trades - self.successful_trades}")
+        print(f"   Win Rate:     {(self.successful_trades/self.total_trades*100) if self.total_trades > 0 else 0:.1f}%")
+        print(f"   {'─'*40}")
+        color = "🟢" if self.total_pnl >= 0 else "🔴"
+        print(f"   {color} TOTAL P&L: ${self.total_pnl:+.2f}")
+        print(f"{'='*60}")
+
+        if self.trade_log:
+            print(f"\n   Recent Trades:")
+            for t in self.trade_log[-5:]:  # Last 5 trades
+                emoji = "✅" if t["result"] == "SUCCESS" else "❌"
+                print(f"   {t['time']} | {emoji} {t['market'][:20]} | ${t['pnl']:+.2f} | {t['details']}")
+
     def execute_trade(self, analysis: Dict) -> bool:
-        """Execute the trade with monitoring."""
+        """Execute the trade with monitoring and P&L tracking."""
         m = analysis["market"]
         size = ORDER_SIZE
+        market_name = m["hour"]
 
         print(f"\n{'='*60}")
         print(f"🚀 EXECUTING TRADE")
@@ -242,11 +284,15 @@ class SmartMarketMaker:
         print(f"   NO:  {size} @ ${analysis['our_no_bid']:.2f}")
         print(f"   Expected profit: ${analysis['profit'] * size:.2f}")
 
+        # Track costs for P&L
+        yes_buy_price = analysis['our_yes_bid']
+        no_buy_price = analysis['our_no_bid']
+
         # Place both orders
         start = time.time()
         with ThreadPoolExecutor(max_workers=2) as ex:
-            yes_f = ex.submit(self.place_order, m["yes_token"], analysis["our_yes_bid"], size, BUY)
-            no_f = ex.submit(self.place_order, m["no_token"], analysis["our_no_bid"], size, BUY)
+            yes_f = ex.submit(self.place_order, m["yes_token"], yes_buy_price, size, BUY)
+            no_f = ex.submit(self.place_order, m["no_token"], no_buy_price, size, BUY)
             yes_id = yes_f.result()
             no_id = no_f.result()
 
@@ -258,6 +304,7 @@ class SmartMarketMaker:
             if yes_id: self.cancel_order(yes_id)
             if no_id: self.cancel_order(no_id)
             print("   ❌ Failed to place both orders")
+            self.log_trade(market_name, "FAILED", 0, "Order placement failed")
             return False
 
         # Monitor fills
@@ -274,7 +321,10 @@ class SmartMarketMaker:
             print(f"\r   [{elapsed:.1f}s] YES: {yes_size:.1f}/{size} | NO: {no_size:.1f}/{size}   ", end="", flush=True)
 
             if yes_filled and no_filled:
-                print(f"\n\n   ✅ BOTH FILLED! Profit: ${analysis['profit'] * size:.2f}")
+                pnl = analysis['profit'] * size
+                print(f"\n\n   ✅ BOTH FILLED! Profit: ${pnl:.2f}")
+                self.log_trade(market_name, "SUCCESS", pnl, f"YES@{yes_buy_price:.2f} + NO@{no_buy_price:.2f}")
+                self.display_pnl_dashboard()
                 return True
 
             time.sleep(0.5)
@@ -286,15 +336,17 @@ class SmartMarketMaker:
         yes_filled, yes_size = self.check_fill(yes_id, size)
         no_filled, no_size = self.check_fill(no_id, size)
 
+        pnl = 0
         if yes_filled and not no_filled:
             print(f"   YES filled ({yes_size}), NO didn't - selling YES")
             self.cancel_order(no_id)
-            # Sell at bid
             yes_ob = self.get_orderbook_deep(m["yes_token"])
             if yes_ob["bids"]:
                 sell_price = yes_ob["bids"][0][0]
                 self.place_order(m["yes_token"], sell_price, yes_size, SELL)
-                print(f"   Sold YES @ ${sell_price:.2f}")
+                pnl = (sell_price - yes_buy_price) * yes_size
+                print(f"   Sold YES @ ${sell_price:.2f} | P&L: ${pnl:+.2f}")
+            self.log_trade(market_name, "EXIT", pnl, f"YES only - sold@{sell_price:.2f}")
 
         elif no_filled and not yes_filled:
             print(f"   NO filled ({no_size}), YES didn't - selling NO")
@@ -303,13 +355,17 @@ class SmartMarketMaker:
             if no_ob["bids"]:
                 sell_price = no_ob["bids"][0][0]
                 self.place_order(m["no_token"], sell_price, no_size, SELL)
-                print(f"   Sold NO @ ${sell_price:.2f}")
+                pnl = (sell_price - no_buy_price) * no_size
+                print(f"   Sold NO @ ${sell_price:.2f} | P&L: ${pnl:+.2f}")
+            self.log_trade(market_name, "EXIT", pnl, f"NO only - sold@{sell_price:.2f}")
 
         else:
             print(f"   Neither filled fully - cancelling both")
             self.cancel_order(yes_id)
             self.cancel_order(no_id)
+            self.log_trade(market_name, "CANCELLED", 0, "Neither filled")
 
+        self.display_pnl_dashboard()
         return False
 
     def run(self):
@@ -376,7 +432,11 @@ class SmartMarketMaker:
                 time.sleep(SCAN_INTERVAL)
 
             except KeyboardInterrupt:
-                print(f"\n\nStopped. Trades executed: {trades}")
+                print(f"\n\n{'='*60}")
+                print("🛑 KILL SWITCH ACTIVATED - STOPPING BOT")
+                print(f"{'='*60}")
+                self.display_pnl_dashboard()
+                print("\nBot stopped safely. All positions should be flat.")
                 break
             except Exception as e:
                 print(f"\nError: {e}")
