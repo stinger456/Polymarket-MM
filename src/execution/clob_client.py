@@ -240,7 +240,10 @@ class PolymarketCLOB:
                 side=order_side,
             )
 
-            signed = self.client.create_order(order)
+            # BTC UP/DOWN markets are NEG_RISK markets - require neg_risk=True
+            from py_clob_client.clob_types import PartialCreateOrderOptions
+            options = PartialCreateOrderOptions(neg_risk=True)
+            signed = self.client.create_order(order, options)
             resp = self.client.post_order(signed, OrderType.GTC)
 
             order_id = resp.get("orderID") or resp.get("id")
