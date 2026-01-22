@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Market Maker - Uses CLOB API directly for valid token IDs
-Filters for ACTIVE markets with existing orderbooks
+Market Maker - Brute force find working markets
 """
 import os
 import time
@@ -21,42 +20,57 @@ ORDER_SIZE = 5
 def main():
     print("\n=== MARKET MAKER ===\n")
 
-    # Connect
     client = ClobClient("https://clob.polymarket.com", key=PRIVATE_KEY,
                         chain_id=137, signature_type=SIG_TYPE, funder=FUNDER)
     client.set_api_creds(client.create_or_derive_api_creds())
     print("Connected!\n")
 
-    # Get markets from CLOB directly
-    print("Fetching markets from CLOB...")
+    # Get ALL markets
+    print("Fetching ALL markets...")
     resp = client.get_simplified_markets()
     all_markets = resp.get("data", []) if isinstance(resp, dict) else []
-    print(f"Found {len(all_markets)} total markets")
+    print(f"Total markets: {len(all_markets)}\n")
 
-    # Filter for markets ACCEPTING ORDERS (the key field!)
-    markets = [m for m in all_markets
-               if m.get("accepting_orders") == True
-               and m.get("tokens")
-               and len(m.get("tokens", [])) >= 2]
-    print(f"Markets accepting orders: {len(markets)}\n")
+    # Try to find markets with ACTUAL orderbooks by checking
+    print("Scanning for markets with active orderbooks...")
+    working_markets = []
 
-    if not markets:
-        print("No active markets!")
-        return
-
-    count = 0
-    skipped = 0
-    for m in markets[:50]:  # Try more markets
-        question = m.get("question", "")[:50]
+    for i, m in enumerate(all_markets):
         tokens = m.get("tokens", [])
-
         if len(tokens) < 2:
             continue
 
-        # Get token info
-        t1 = tokens[0]
-        t2 = tokens[1]
+        token_id = tokens[0].get("token_id")
+        if not token_id:
+            continue
 
+        # Try to get orderbook - this tells us if market is actually active
+        try:
+            book = client.get_order_book(token_id)
+            # Check if it has ANY orders (bids or asks)
+            if book and (book.get("bids") or book.get("asks")):
+                working_markets.append(m)
+                if len(working_markets) >= 20:  # Found enough
+                    break
+        except:
+            pass  # No orderbook, skip
+
+        if i % 100 == 0:
+            print(f"  Scanned {i}/{len(all_markets)}, found {len(working_markets)} active...")
+
+    print(f"\nFound {len(working_markets)} markets with active orderbooks!\n")
+
+    if not working_markets:
+        print("No markets with orderbooks found!")
+        return
+
+    # Now place orders on working markets
+    count = 0
+    for m in working_markets:
+        question = m.get("question", "")[:50]
+        tokens = m.get("tokens", [])
+
+        t1, t2 = tokens[0], tokens[1]
         token1_id = t1.get("token_id")
         token2_id = t2.get("token_id")
         price1 = float(t1.get("price", 0.5))
@@ -68,7 +82,6 @@ def main():
         if price1 < 0.1 or price1 > 0.9:
             continue
 
-        # Bid 5 cents below
         bid1 = max(0.01, round(price1 - 0.05, 2))
         bid2 = max(0.01, round(price2 - 0.05, 2))
 
@@ -76,9 +89,9 @@ def main():
         print(f"  {outcome1}: ${price1:.2f} -> bid ${bid1:.2f}")
         print(f"  {outcome2}: ${price2:.2f} -> bid ${bid2:.2f}")
 
-        # Place orders
         oid1 = None
         oid2 = None
+
         try:
             order1 = OrderArgs(token_id=token1_id, price=bid1, size=ORDER_SIZE, side=BUY)
             signed1 = client.create_order(order1)
@@ -87,11 +100,7 @@ def main():
             if oid1:
                 print(f"  ORDER 1: {oid1[:20]}...")
         except Exception as e:
-            err = str(e)
-            if "does not exist" in err:
-                print(f"  Skipping (no orderbook)")
-                continue
-            print(f"  Error 1: {err[:60]}")
+            print(f"  Error 1: {str(e)[:50]}")
 
         try:
             order2 = OrderArgs(token_id=token2_id, price=bid2, size=ORDER_SIZE, side=BUY)
@@ -101,16 +110,14 @@ def main():
             if oid2:
                 print(f"  ORDER 2: {oid2[:20]}...")
         except Exception as e:
-            err = str(e)
-            if "does not exist" not in err:
-                print(f"  Error 2: {err[:60]}")
+            print(f"  Error 2: {str(e)[:50]}")
 
         if oid1 or oid2:
             count += 1
         print()
         time.sleep(0.3)
 
-    print(f"=== Orders placed on {count} markets (skipped {skipped} inactive) ===")
+    print(f"=== Orders placed on {count} markets ===")
     print("Check: https://polymarket.com/portfolio")
 
 if __name__ == "__main__":
