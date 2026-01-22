@@ -4,21 +4,23 @@ Entry point for the Polymarket Sports Market Maker.
 
 Usage:
     # Paper trading (default)
-    python -m src.sports.sports_main --paper
+    python src/sports/sports_main.py --paper
 
     # Live trading
-    python -m src.sports.sports_main --live
+    python src/sports/sports_main.py --live
 
     # Filter to specific sport
-    python -m src.sports.sports_main --paper --sport NBA
+    python src/sports/sports_main.py --paper --sport NBA
 """
 import argparse
 import asyncio
 import os
 import sys
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Add project root to path - works from any directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+os.chdir(PROJECT_ROOT)  # Change to project directory
 
 import structlog
 from src.config import load_config
