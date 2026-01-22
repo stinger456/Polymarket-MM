@@ -100,6 +100,23 @@ def main():
     print(f"Private key: {private_key[:10]}...")
     print(f"Safe address: {safe_address}")
 
+    # Derive EOA address from private key to check configuration
+    try:
+        from eth_account import Account
+        account = Account.from_key(private_key)
+        eoa_address = account.address
+        print(f"EOA address (from key): {eoa_address}")
+
+        if safe_address.lower() == eoa_address.lower():
+            print("\n⚠️  WARNING: POLY_SAFE_ADDRESS equals your EOA address!")
+            print("   This is WRONG. Your Safe address should be different.")
+            print("   Get your Safe address from polymarket.com -> Profile -> Deposit")
+            print("   Update .env with the correct POLY_SAFE_ADDRESS")
+            print("\n   Expected Safe: 0x731ea493985381ef0e79ec5c7c53d472a7e40e54")
+            return
+    except ImportError:
+        print("eth_account not installed, skipping EOA check")
+
     yes_token, no_token = get_token_id()
     if not yes_token:
         print("❌ Could not get token ID!")
@@ -124,7 +141,15 @@ def main():
         # Get markets from CLOB
         resp = http.get("https://clob.polymarket.com/markets")
         if resp.status_code == 200:
-            markets = resp.json()
+            data = resp.json()
+            # Handle different response formats
+            if isinstance(data, dict):
+                markets = data.get("data", []) or data.get("markets", []) or []
+            elif isinstance(data, list):
+                markets = data
+            else:
+                markets = []
+
             # Find first non-neg_risk market
             regular_token = None
             for m in markets[:50]:
