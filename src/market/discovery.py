@@ -116,124 +116,95 @@ class MarketDiscovery:
     async def get_markets_from_event(self, event: dict) -> List[Market]:
         """
         Parse all active markets from an event.
-
-        Args:
-            event: Event data from Gamma API
-
-        Returns:
-            List of Market objects
         """
         markets = []
         event_markets = event.get("markets", [])
 
-        logger.info("Processing event markets",
-                    event_title=event.get("title", "")[:50],
-                    raw_market_count=len(event_markets))
+        logger.info("Processing event",
+                    title=event.get("title", "")[:50],
+                    market_count=len(event_markets))
 
         for raw_market in event_markets:
-            # Debug: log raw market data
-            logger.debug("Raw market data",
-                        condition_id=raw_market.get("conditionId"),
-                        question=raw_market.get("question", "")[:60],
-                        end_date=raw_market.get("endDate"),
-                        closed=raw_market.get("closed"),
-                        tokens=len(raw_market.get("tokens", [])),
-                        clob_token_ids=len(raw_market.get("clobTokenIds", [])))
+            question = raw_market.get("question", "")
+            closed = raw_market.get("closed", False)
+            condition_id = raw_market.get("conditionId", "")
+            clob_tokens = raw_market.get("clobTokenIds", [])
 
-            # Skip closed markets
-            if raw_market.get("closed", False):
-                logger.debug("Skipping closed market", question=raw_market.get("question", "")[:40])
+            logger.debug("Raw market",
+                        question=question[:50],
+                        closed=closed,
+                        has_tokens=len(clob_tokens) >= 2)
+
+            # Skip if explicitly closed
+            if closed:
                 continue
 
+            # Try to parse
             market = self._parse_market(raw_market)
             if market:
-                # Check if market has time remaining
                 if market.time_remaining_seconds > 0:
                     markets.append(market)
-                    logger.info("Parsed active market",
-                               question=market.question[:50],
-                               end_time=market.end_time.isoformat(),
-                               time_remaining_min=market.time_remaining_minutes)
-                else:
-                    logger.debug("Market expired", question=market.question[:40])
+                    logger.info("FOUND TRADEABLE MARKET",
+                               question=market.question[:60],
+                               minutes_left=round(market.time_remaining_minutes, 1),
+                               yes_token=market.yes_token_id[:30])
             else:
-                logger.warning("Failed to parse market",
-                              question=raw_market.get("question", "")[:50],
-                              condition_id=raw_market.get("conditionId"))
+                # Log WHY parsing failed
+                logger.warning("Parse failed",
+                              question=question[:40],
+                              condition_id=condition_id[:20] if condition_id else "NONE",
+                              tokens=len(clob_tokens))
 
-        # Sort by end time
-        markets.sort(key=lambda m: m.end_time)
-
-        logger.info("Parsed markets from event", count=len(markets))
+        logger.info("Parsed markets", count=len(markets))
         return markets
 
     async def find_btc_hourly_events(self) -> List[dict]:
         """
         Search for Bitcoin UP/DOWN hourly events.
-
-        Prioritizes events for TODAY over future dates.
-        Returns list of events matching the pattern.
+        Returns ALL matching events - filtering done later.
         """
         client = await self._get_client()
 
         try:
-            # Search for active events with "bitcoin" in title
             response = await client.get(
                 f"{self.gamma_url}/events",
-                params={
-                    "active": "true",
-                    "closed": "false",
-                    "limit": 200,
-                },
+                params={"active": "true", "closed": "false", "limit": 200},
             )
             response.raise_for_status()
             events = response.json()
 
-            btc_events = []
-            today_events = []
-            now = datetime.now(timezone.utc)
+            logger.info("Fetched events from API", total_count=len(events))
 
+            btc_events = []
             for event in events:
                 title = event.get("title", "").lower()
                 slug = event.get("slug", "").lower()
+                markets = event.get("markets", [])
 
-                # Match "bitcoin up or down" pattern
-                if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
-                    # Check if any markets in the event have time remaining
-                    has_active_markets = False
-                    for market in event.get("markets", []):
-                        end_date_str = market.get("endDate")
-                        if end_date_str:
-                            try:
-                                if end_date_str.endswith("Z"):
-                                    end_date_str = end_date_str[:-1] + "+00:00"
-                                end_time = datetime.fromisoformat(end_date_str)
-                                if end_time > now and not market.get("closed", False):
-                                    has_active_markets = True
-                                    break
-                            except ValueError:
-                                pass
+                # Match ANY bitcoin/btc event
+                is_btc = "bitcoin" in title or "btc" in title
+                is_hourly = "up" in title or "down" in title or "hourly" in title or "hour" in slug
 
-                    if has_active_markets:
+                if is_btc:
+                    logger.info("Found BTC event",
+                               title=event.get("title"),
+                               slug=slug,
+                               markets=len(markets),
+                               is_hourly=is_hourly)
+
+                    # Prioritize hourly/up-down events
+                    if is_hourly:
+                        btc_events.insert(0, event)
+                    else:
                         btc_events.append(event)
-                        logger.info(
-                            "Found BTC hourly event with active markets",
-                            title=event.get("title"),
-                            slug=slug,
-                            markets_count=len(event.get("markets", [])),
-                        )
 
-                        # Check if this is today's event (based on slug or title)
-                        # Slugs look like: bitcoin-up-or-down-january-21-8pm-et
-                        today_str = now.strftime("%B-%d").lower()  # e.g., "january-21"
-                        if today_str in slug.replace(" ", "-"):
-                            today_events.append(event)
-                            logger.info("This is TODAY's event", slug=slug)
-
-            # Prioritize today's events
-            if today_events:
-                logger.info("Found today's BTC events", count=len(today_events))
-                return today_events
+            if btc_events:
+                logger.info("Found BTC events", count=len(btc_events))
+            else:
+                logger.warning("No BTC events found in API response")
+                # Log first few event titles for debugging
+                for e in events[:5]:
+                    logger.debug("Available event", title=e.get("title", "")[:60])
 
             return btc_events
 
@@ -556,75 +527,66 @@ class MarketDiscovery:
     async def get_hourly_btc_markets(self) -> List[Market]:
         """
         Find all active hourly BTC markets.
-
-        If event_slug is set, fetches markets from that specific event.
-        Otherwise, searches for BTC UP/DOWN events automatically (prioritizing TODAY).
-
         Returns markets sorted by end time (soonest first).
         """
         markets = []
 
         # If specific event slug is provided, try that first
         if self.event_slug:
-            logger.info("Fetching markets from specified event", slug=self.event_slug)
+            logger.info("Fetching from specified event", slug=self.event_slug)
             event = await self.get_event_by_slug(self.event_slug)
             if event:
                 markets = await self.get_markets_from_event(event)
                 if markets:
-                    self._markets_cache = markets
-                    self._cache_time = datetime.now(timezone.utc)
-                    logger.info("Found markets from specified event", count=len(markets))
-                    return markets
-                else:
-                    logger.warning("No active markets in specified event, searching for today's event...")
+                    logger.info("Got markets from specified event", count=len(markets))
 
-        # Search for BTC hourly events (prioritizes today's event)
-        logger.info("Searching for BTC hourly events...")
-        btc_events = await self.find_btc_hourly_events()
+        # If no markets yet, search for BTC events
+        if not markets:
+            logger.info("Searching for BTC events...")
+            btc_events = await self.find_btc_hourly_events()
 
-        if not btc_events:
-            logger.warning("No BTC hourly events found")
-            return []
+            for event in btc_events:
+                event_markets = await self.get_markets_from_event(event)
+                markets.extend(event_markets)
+                # Stop after finding markets
+                if markets:
+                    logger.info("Found markets in event",
+                               event=event.get("title", "")[:40],
+                               count=len(event_markets))
+                    break
 
-        # Process each event
-        for event in btc_events:
-            event_markets = await self.get_markets_from_event(event)
-            markets.extend(event_markets)
+        # If still no markets, try CLOB API directly
+        if not markets:
+            logger.info("Trying CLOB API directly...")
+            clob_markets = await self.get_btc_hourly_from_clob()
+            for raw in clob_markets:
+                m = self._parse_market(raw)
+                if m and m.time_remaining_seconds > 60:
+                    markets.append(m)
 
-        # Deduplicate by condition_id
+        # Deduplicate
         seen = set()
-        unique_markets = []
+        unique = []
         for m in markets:
             if m.condition_id not in seen:
                 seen.add(m.condition_id)
-                unique_markets.append(m)
-        markets = unique_markets
+                unique.append(m)
+        markets = unique
 
-        # Sort by end time (soonest first)
+        # Sort by end time
         markets.sort(key=lambda m: m.end_time)
 
-        # Filter to only markets ending within the next few hours
-        now = datetime.now(timezone.utc)
-        tradeable_markets = []
-        for m in markets:
-            hours_until = (m.end_time - now).total_seconds() / 3600
-            # Trade markets ending in the next 4 hours
-            if 0 < hours_until <= 4:
-                tradeable_markets.append(m)
-                logger.info("Tradeable market found",
-                           question=m.question[:50],
-                           hours_until=round(hours_until, 2),
-                           minutes_until=round(hours_until * 60, 1))
-
-        self._markets_cache = tradeable_markets if tradeable_markets else markets
+        self._markets_cache = markets
         self._cache_time = datetime.now(timezone.utc)
 
-        if tradeable_markets:
-            logger.info("Found tradeable hourly BTC markets", count=len(tradeable_markets))
-            return tradeable_markets
-        else:
-            logger.info("Found hourly BTC markets (none within trading window)", count=len(markets))
-            return markets
+        logger.info("Total BTC markets found", count=len(markets))
+        for m in markets[:5]:
+            logger.info("Market",
+                       question=m.question[:50],
+                       minutes_left=round(m.time_remaining_minutes, 1),
+                       yes_token=m.yes_token_id[:20] + "...")
+
+        return markets
 
     async def get_active_hourly_btc_market(self) -> Optional[Market]:
         """
