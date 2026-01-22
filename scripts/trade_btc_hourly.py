@@ -63,8 +63,8 @@ def fetch_event_by_slug(slug: str) -> Optional[dict]:
     return None
 
 
-def get_market_tokens(event: dict) -> Optional[Tuple[str, str, str]]:
-    """Extract YES and NO token IDs from event."""
+def get_market_tokens(event: dict) -> Optional[Tuple[str, str, str, float, float]]:
+    """Extract YES and NO token IDs and prices from event."""
     markets = event.get("markets", [])
 
     for market in markets:
@@ -74,11 +74,19 @@ def get_market_tokens(event: dict) -> Optional[Tuple[str, str, str]]:
         question = market.get("question", "")
         tokens = market.get("clobTokenIds", [])
 
+        # Get current prices from event data
+        outcome_prices = market.get("outcomePrices", [])
+        if isinstance(outcome_prices, str):
+            outcome_prices = json.loads(outcome_prices)
+
         if isinstance(tokens, str):
             tokens = json.loads(tokens)
 
         if len(tokens) >= 2:
-            return tokens[0], tokens[1], question
+            # Parse prices (YES=index 0, NO=index 1)
+            yes_price = float(outcome_prices[0]) if len(outcome_prices) > 0 else 0.50
+            no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.50
+            return tokens[0], tokens[1], question, yes_price, no_price
     return None
 
 
@@ -163,35 +171,35 @@ def main():
         print("❌ No open markets found")
         return
 
-    yes_token, no_token, question = result
+    yes_token, no_token, question, yes_mkt_price, no_mkt_price = result
     print(f"Market: {question}")
-    print(f"YES: {yes_token[:40]}...")
-    print(f"NO: {no_token[:40]}...")
+    print(f"YES (Up): {yes_token[:40]}... @ ${yes_mkt_price:.3f}")
+    print(f"NO (Down): {no_token[:40]}... @ ${no_mkt_price:.3f}")
 
     print("\nConnecting...")
     client = create_client()
     print("✅ Connected!")
 
-    ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "10"))
+    ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))  # Start small
 
-    print("\nFetching orderbook...")
-    try:
-        yes_book = client.get_order_book(yes_token)
-        no_book = client.get_order_book(no_token)
-        yes_best_bid = float(yes_book.bids[0].price) if yes_book.bids else 0.40
-        no_best_bid = float(no_book.bids[0].price) if no_book.bids else 0.40
-        print(f"YES best bid: {yes_best_bid:.2f}")
-        print(f"NO best bid: {no_best_bid:.2f}")
-        yes_bid_price = round(yes_best_bid - 0.01, 2)
-        no_bid_price = round(no_best_bid - 0.01, 2)
-    except Exception as e:
-        print(f"Orderbook error: {e}")
-        yes_bid_price = 0.45
-        no_bid_price = 0.45
+    # Use market prices from event data, bid slightly below
+    # For market making, we want: YES_bid + NO_bid < $1.00
+    spread = 0.02  # 2% below market price
 
-    if yes_bid_price + no_bid_price >= 0.98:
-        yes_bid_price = 0.48
-        no_bid_price = 0.48
+    yes_bid_price = round(max(0.01, yes_mkt_price - spread), 2)
+    no_bid_price = round(max(0.01, no_mkt_price - spread), 2)
+
+    # Ensure combined bids < $1 for guaranteed profit
+    while yes_bid_price + no_bid_price >= 0.98:
+        yes_bid_price = round(yes_bid_price - 0.01, 2)
+        no_bid_price = round(no_bid_price - 0.01, 2)
+
+    # Ensure minimum prices
+    yes_bid_price = max(0.01, yes_bid_price)
+    no_bid_price = max(0.01, no_bid_price)
+
+    print(f"\nMarket prices: YES=${yes_mkt_price:.2f}, NO=${no_mkt_price:.2f}")
+    print(f"Our bids:      YES=${yes_bid_price:.2f}, NO=${no_bid_price:.2f}")
 
     print(f"\n{'='*60}")
     print("PLACING ORDERS")
