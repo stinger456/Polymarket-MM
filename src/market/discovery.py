@@ -208,8 +208,8 @@ class MarketDiscovery:
 
     async def find_btc_hourly_events(self) -> List[dict]:
         """
-        Search for Bitcoin UP/DOWN hourly events.
-        Returns ALL matching events - filtering done later.
+        Search for Bitcoin UP/DOWN hourly events ONLY.
+        This filters strictly for "Bitcoin Up or Down" hourly markets.
         """
         try:
             response = await self._request_with_retry(
@@ -221,38 +221,42 @@ class MarketDiscovery:
 
             logger.info("Fetched events from API", total_count=len(events))
 
-            btc_events = []
+            btc_hourly_events = []
             for event in events:
                 title = event.get("title", "").lower()
                 slug = event.get("slug", "").lower()
-                markets = event.get("markets", [])
 
-                # Match ANY bitcoin/btc event
-                is_btc = "bitcoin" in title or "btc" in title
-                is_hourly = "up" in title or "down" in title or "hourly" in title or "hour" in slug
+                # STRICT FILTER: Only "Bitcoin Up or Down" hourly markets
+                # Must match pattern like "bitcoin-up-or-down-january-22-9am-et"
+                is_hourly_updown = (
+                    ("bitcoin" in title or "btc" in title) and
+                    "up" in title and "down" in title and
+                    # Exclude long-term markets
+                    "microstrategy" not in title and
+                    "150k" not in title and
+                    "80k" not in title and
+                    "$1" not in title and  # Excludes $100k, $150k, etc.
+                    "salvador" not in title and
+                    "hit" not in title  # Excludes "Will Bitcoin hit X"
+                )
 
-                if is_btc:
-                    logger.info("Found BTC event",
+                # Also check slug for hourly pattern
+                is_hourly_slug = "up-or-down" in slug and ("am-et" in slug or "pm-et" in slug)
+
+                if is_hourly_updown or is_hourly_slug:
+                    logger.info("Found HOURLY BTC UP/DOWN event",
                                title=event.get("title"),
-                               slug=slug,
-                               markets=len(markets),
-                               is_hourly=is_hourly)
+                               slug=slug)
+                    btc_hourly_events.append(event)
 
-                    # Prioritize hourly/up-down events
-                    if is_hourly:
-                        btc_events.insert(0, event)
-                    else:
-                        btc_events.append(event)
-
-            if btc_events:
-                logger.info("Found BTC events", count=len(btc_events))
+            if btc_hourly_events:
+                logger.info("Found hourly BTC UP/DOWN events", count=len(btc_hourly_events))
             else:
-                logger.warning("No BTC events found in API response")
-                # Log first few event titles for debugging
-                for e in events[:5]:
-                    logger.debug("Available event", title=e.get("title", "")[:60])
+                logger.warning("No hourly BTC UP/DOWN events found - checking all titles")
+                for e in events[:10]:
+                    logger.debug("Event", title=e.get("title", "")[:60], slug=e.get("slug", ""))
 
-            return btc_events
+            return btc_hourly_events
 
         except httpx.HTTPError as e:
             logger.error("Failed to search for BTC events", error=str(e))
@@ -325,12 +329,22 @@ class MarketDiscovery:
                 "GET",
                 f"{self.CLOB_URL}/markets",
             )
-            markets = response.json()
+            data = response.json()
+
+            # Handle different response formats
+            if isinstance(data, dict):
+                markets = data.get("data", []) or data.get("markets", []) or []
+            elif isinstance(data, list):
+                markets = data
+            else:
+                markets = []
 
             # Filter by query
             query_lower = query.lower()
             filtered = []
             for m in markets:
+                if not isinstance(m, dict):
+                    continue
                 q = m.get("question", "").lower()
                 desc = m.get("description", "").lower()
                 if query_lower in q or query_lower in desc:
@@ -349,18 +363,29 @@ class MarketDiscovery:
         """
         try:
             response = await self._request_with_retry("GET", f"{self.CLOB_URL}/markets")
-            all_markets = response.json()
+            data = response.json()
+
+            # Handle different response formats
+            if isinstance(data, dict):
+                all_markets = data.get("data", []) or data.get("markets", []) or []
+            elif isinstance(data, list):
+                all_markets = data
+            else:
+                logger.error("Unexpected CLOB response format", type=type(data).__name__)
+                return []
 
             # Filter for BTC up/down hourly markets
             btc_hourly = []
             for m in all_markets:
+                if not isinstance(m, dict):
+                    continue
                 q = m.get("question", "").lower()
-                # Look for BTC/Bitcoin + price levels
-                if ("btc" in q or "bitcoin" in q) and ("above" in q or "below" in q or "up" in q or "down" in q):
-                    # Exclude long-term markets
-                    if "$1m" not in q and "million" not in q and "100k" not in q.replace(",", ""):
+                # Look for BTC/Bitcoin + "up" AND "down" (hourly markets)
+                if ("btc" in q or "bitcoin" in q) and "up" in q and "down" in q:
+                    # Exclude long-term/other markets
+                    if "microstrategy" not in q and "150k" not in q and "80k" not in q and "hit" not in q:
                         btc_hourly.append(m)
-                        logger.debug("Found potential BTC hourly market", question=m.get("question", "")[:60])
+                        logger.debug("Found BTC hourly from CLOB", question=m.get("question", "")[:60])
 
             logger.info("Found BTC hourly markets from CLOB", count=len(btc_hourly))
             return btc_hourly
