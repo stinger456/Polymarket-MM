@@ -240,7 +240,12 @@ async def get_sports_events(
         "limit": limit,
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
         try:
             resp = await client.get(f"{GAMMA_URL}/events", params=params)
             resp.raise_for_status()
