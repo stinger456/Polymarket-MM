@@ -177,6 +177,13 @@ class Config(BaseSettings):
     # Chain configuration
     chain_id: int = Field(default=137, description="Polygon chain ID")
 
+    # Signature type: 0=EOA (MetaMask), 1=Email/Magic, 2=Browser proxy (Safe)
+    signature_type: int = Field(
+        default=1,
+        alias="POLY_SIGNATURE_TYPE",
+        description="Signature type: 0=EOA, 1=Email/Magic, 2=Browser proxy"
+    )
+
     class Config:
         env_prefix = ""
         populate_by_name = True
@@ -259,7 +266,10 @@ def create_clob_client(config: Config):
     """
     Initialize the Polymarket CLOB client using the official py-clob-client.
 
-    Uses signature_type=2 for Polymarket proxy wallet (Safe).
+    Signature types:
+    - 0: EOA (MetaMask, hardware wallet)
+    - 1: Email/Magic wallet
+    - 2: Browser proxy wallet (Polymarket Safe)
 
     Returns:
         ClobClient: Initialized and authenticated client
@@ -276,12 +286,12 @@ def create_clob_client(config: Config):
             "Set POLY_PRIVATE_KEY and POLY_SAFE_ADDRESS environment variables."
         )
 
-    # Initialize client with proxy wallet signature type
+    # Initialize client with configured signature type
     client = ClobClient(
         config.clob_url,
         key=config.private_key,
         chain_id=config.chain_id,
-        signature_type=2,  # Polymarket proxy wallet (Safe)
+        signature_type=config.signature_type,  # 0=EOA, 1=Email, 2=Browser proxy
         funder=config.safe_address,
     )
 
