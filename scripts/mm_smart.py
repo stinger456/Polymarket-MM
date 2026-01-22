@@ -362,18 +362,16 @@ class SmartMarketMaker:
                 print(f"\r[{ts}] Scan #{scan} | {status} | Trades: {trades}   ", end="", flush=True)
 
                 if best:
-                    # Show orderbook and execute
+                    # Show orderbook and auto-execute
                     self.display_orderbook(best)
+                    print("\n   💰 PROFITABLE - AUTO-EXECUTING!")
 
-                    print("\n   💰 PROFITABLE OPPORTUNITY FOUND!")
-                    confirm = input("   Execute trade? (y/n): ").strip().lower()
+                    success = self.execute_trade(best)
+                    if success:
+                        trades += 1
 
-                    if confirm == 'y':
-                        success = self.execute_trade(best)
-                        if success:
-                            trades += 1
-                    else:
-                        print("   Skipped.")
+                    # Brief pause before next scan
+                    time.sleep(3)
 
                 time.sleep(SCAN_INTERVAL)
 
