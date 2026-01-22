@@ -138,15 +138,77 @@ def parse_markets(event: dict):
     return markets
 
 
-async def main():
-    if len(sys.argv) < 2:
-        # Default to today's event
-        slug = "bitcoin-up-or-down-january-21-8pm-et"
-        print(f"No slug provided, using: {slug}")
-    else:
-        slug = sys.argv[1]
+async def find_current_btc_event():
+    """Find the current active BTC UP/DOWN event automatically."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        print("\n" + "=" * 70)
+        print("SEARCHING FOR ACTIVE BTC UP/DOWN EVENTS...")
+        print("=" * 70)
 
-    event = await get_event_markets(slug)
+        response = await client.get(
+            f"{GAMMA_URL}/events",
+            params={"active": "true", "closed": "false", "limit": 100}
+        )
+        events = response.json()
+        now = datetime.now(timezone.utc)
+
+        active_events = []
+        for event in events:
+            title = event.get("title", "").lower()
+            slug = event.get("slug", "")
+
+            # Match Bitcoin UP/DOWN events
+            if ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
+                # Check for active markets
+                for m in event.get("markets", []):
+                    end_str = m.get("endDate", "")
+                    closed = m.get("closed", False)
+                    if end_str and not closed:
+                        try:
+                            if end_str.endswith("Z"):
+                                end_str = end_str[:-1] + "+00:00"
+                            end_time = datetime.fromisoformat(end_str)
+                            mins_left = (end_time - now).total_seconds() / 60
+                            if mins_left > 0:
+                                active_events.append({
+                                    "title": event.get("title"),
+                                    "slug": slug,
+                                    "end_time": end_time,
+                                    "minutes_left": mins_left,
+                                    "event": event
+                                })
+                                break
+                        except:
+                            pass
+
+        if active_events:
+            active_events.sort(key=lambda x: x["end_time"])
+            print(f"\nFound {len(active_events)} active BTC UP/DOWN event(s):\n")
+            for i, e in enumerate(active_events[:5]):
+                print(f"  {i+1}. {e['title']}")
+                print(f"     slug: {e['slug']}")
+                print(f"     expires in: {e['minutes_left']:.1f} minutes")
+            return active_events[0]
+        return None
+
+
+async def main():
+    if len(sys.argv) >= 2:
+        slug = sys.argv[1]
+        print(f"Using provided slug: {slug}")
+        event = await get_event_markets(slug)
+    else:
+        # Auto-find current active event
+        result = await find_current_btc_event()
+        if result:
+            event = result["event"]
+            slug = result["slug"]
+            print(f"\nUsing: {slug}")
+        else:
+            print("\nNo active BTC UP/DOWN events found!")
+            print("Check https://polymarket.com for current events.")
+            return
+
     if not event:
         return
 
@@ -158,23 +220,26 @@ async def main():
     print("=" * 70)
 
     if not markets:
-        print("\nNo tradeable markets found in this event.")
-        print("Possible reasons:")
-        print("  - All markets have expired (event is for a past time)")
-        print("  - Markets are closed")
-        print("  - Event hasn't started yet")
+        print("\nNo tradeable markets in this event (may have just expired).")
+        print("\nSearching for next active event...")
+        result = await find_current_btc_event()
+        if result:
+            print(f"\nTry running:")
+            print(f"  python scripts/trade_btc_hourly.py {result['slug']}")
         return
 
-    # Show the next market to trade
+    # Show the market to trade
     markets.sort(key=lambda x: x["end_time"])
     next_market = markets[0]
 
-    print(f"\nNEXT MARKET TO TRADE:")
+    print(f"\nMARKET TO TRADE:")
     print(f"  {next_market['question']}")
-    print(f"  Minutes until resolution: {next_market['minutes_left']:.1f}")
-    print(f"\nTo trade this market, the bot needs these token IDs:")
+    print(f"  Minutes left: {next_market['minutes_left']:.1f}")
+    print(f"\nToken IDs:")
     print(f"  YES: {next_market['yes_token']}")
     print(f"  NO:  {next_market['no_token']}")
+    print(f"\nRun the bot:")
+    print(f"  python -m src.main --live --event {slug}")
 
 
 if __name__ == "__main__":
