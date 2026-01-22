@@ -7,6 +7,7 @@ Supports fetching by event slug (e.g., "bitcoin-up-or-down-january-21-8pm-et").
 
 import re
 import asyncio
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import httpx
@@ -16,6 +17,13 @@ from .market_state import Market, MarketStatus
 
 
 logger = structlog.get_logger(__name__)
+
+# Default headers to avoid Cloudflare blocks
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class MarketDiscovery:
@@ -63,11 +71,25 @@ class MarketDiscovery:
         self._client: Optional[httpx.AsyncClient] = None
         self._markets_cache: List[Market] = []
         self._cache_time: Optional[datetime] = None
+        self._last_request_time: float = 0
+        self._min_request_interval: float = 1.0  # Minimum 1 second between requests
+
+    async def _rate_limit(self):
+        """Ensure minimum delay between API requests to avoid Cloudflare blocks."""
+        import time
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            delay = self._min_request_interval - elapsed + random.uniform(0.1, 0.3)
+            await asyncio.sleep(delay)
+        self._last_request_time = time.time()
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """Get or create HTTP client with proper headers."""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                headers=DEFAULT_HEADERS,
+            )
         return self._client
 
     async def close(self):
@@ -75,6 +97,34 @@ class MarketDiscovery:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make HTTP request with retry logic for rate limiting."""
+        client = await self._get_client()
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            await self._rate_limit()
+            try:
+                response = await client.request(method, url, **kwargs)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 403 and attempt < max_retries - 1:
+                    # Cloudflare block - wait and retry with exponential backoff
+                    delay = (2 ** attempt) + random.uniform(1, 3)
+                    logger.warning("Rate limited, retrying", delay=delay, attempt=attempt + 1)
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+            except httpx.HTTPError as e:
+                if attempt < max_retries - 1:
+                    delay = (2 ** attempt) + random.uniform(0.5, 1.5)
+                    logger.warning("Request failed, retrying", error=str(e), delay=delay)
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        raise httpx.HTTPError("Max retries exceeded")
 
     async def get_event_by_slug(self, slug: str) -> Optional[dict]:
         """
@@ -86,14 +136,12 @@ class MarketDiscovery:
         Returns:
             Event data with nested markets, or None
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.gamma_url}/events",
                 params={"slug": slug},
             )
-            response.raise_for_status()
             events = response.json()
 
             if events:
@@ -163,14 +211,12 @@ class MarketDiscovery:
         Search for Bitcoin UP/DOWN hourly events.
         Returns ALL matching events - filtering done later.
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.gamma_url}/events",
                 params={"active": "true", "closed": "false", "limit": 200},
             )
-            response.raise_for_status()
             events = response.json()
 
             logger.info("Fetched events from API", total_count=len(events))
@@ -218,10 +264,9 @@ class MarketDiscovery:
 
         Returns raw market data from API.
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.gamma_url}/markets",
                 params={
                     "closed": "false",
@@ -229,7 +274,6 @@ class MarketDiscovery:
                     "limit": limit,
                 },
             )
-            response.raise_for_status()
             markets = response.json()
 
             # Log BTC-related markets for debugging
@@ -253,10 +297,9 @@ class MarketDiscovery:
         Fetch events from Gamma API.
         Events can contain multiple related markets.
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.gamma_url}/events",
                 params={
                     "closed": "false",
@@ -264,7 +307,6 @@ class MarketDiscovery:
                     "limit": limit,
                 },
             )
-            response.raise_for_status()
             events = response.json()
             logger.info("Fetched events", count=len(events))
             return events
@@ -277,14 +319,12 @@ class MarketDiscovery:
         """
         Search for markets using the CLOB API.
         """
-        client = await self._get_client()
-
         try:
             # Try CLOB API search
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.CLOB_URL}/markets",
             )
-            response.raise_for_status()
             markets = response.json()
 
             # Filter by query
@@ -307,11 +347,8 @@ class MarketDiscovery:
         """
         Get BTC hourly markets directly from CLOB API.
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(f"{self.CLOB_URL}/markets")
-            response.raise_for_status()
+            response = await self._request_with_retry("GET", f"{self.CLOB_URL}/markets")
             all_markets = response.json()
 
             # Filter for BTC up/down hourly markets
@@ -647,13 +684,11 @@ class MarketDiscovery:
         """
         Get a specific market by its condition ID.
         """
-        client = await self._get_client()
-
         try:
-            response = await client.get(
+            response = await self._request_with_retry(
+                "GET",
                 f"{self.gamma_url}/markets/{condition_id}",
             )
-            response.raise_for_status()
             raw_market = response.json()
             return self._parse_market(raw_market)
 

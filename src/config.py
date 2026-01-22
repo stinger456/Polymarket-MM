@@ -44,8 +44,8 @@ class TradingConfig(BaseModel):
         description="Price spacing between levels"
     )
     quote_refresh_seconds: float = Field(
-        default=2.0,
-        description="How often to update quotes"
+        default=5.0,
+        description="How often to update quotes (seconds between iterations)"
     )
     base_order_size: float = Field(
         default=50.0,
@@ -159,7 +159,7 @@ class Config(BaseSettings):
     max_total_exposure: float = Field(default=5000.0, alias="MAX_TOTAL_EXPOSURE")
     num_quote_levels: int = Field(default=3, alias="NUM_QUOTE_LEVELS")
     level_spacing: float = Field(default=0.01, alias="LEVEL_SPACING")
-    quote_refresh_seconds: float = Field(default=2.0, alias="QUOTE_REFRESH_SECONDS")
+    quote_refresh_seconds: float = Field(default=5.0, alias="QUOTE_REFRESH_SECONDS")
     base_order_size: float = Field(default=50.0, alias="BASE_ORDER_SIZE")
 
     # Risk parameters from env
