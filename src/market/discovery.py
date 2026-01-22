@@ -38,12 +38,14 @@ class MarketDiscovery:
     HOURLY_PATTERNS = [
         r"(\d{1,2}):00",  # "3:00", "15:00"
         r"(\d{1,2})\s*(am|pm)",  # "3 PM", "3PM"
+        r"up.?or.?down",  # "up or down" markets
+        r"above.*\$[\d,]+",  # "above $97,500"
+        r"hourly",
     ]
 
     EXCLUDE_PATTERNS = [
         r"15.?min",  # Exclude 15-minute markets
         r"4.?hour",  # Exclude 4-hour markets
-        r"daily",
         r"weekly",
     ]
 
@@ -83,7 +85,19 @@ class MarketDiscovery:
                 },
             )
             response.raise_for_status()
-            return response.json()
+            markets = response.json()
+
+            # Log BTC-related markets for debugging
+            btc_markets = []
+            for m in markets:
+                q = m.get("question", "").lower()
+                if "btc" in q or "bitcoin" in q:
+                    btc_markets.append(m.get("question", "")[:80])
+
+            if btc_markets:
+                logger.info("Found BTC-related markets", count=len(btc_markets), samples=btc_markets[:5])
+
+            return markets
 
         except httpx.HTTPError as e:
             logger.error("Failed to fetch markets", error=str(e))
