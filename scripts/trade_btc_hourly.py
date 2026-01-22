@@ -10,6 +10,7 @@ import asyncio
 import sys
 import os
 from datetime import datetime, timezone
+import json
 
 # Add parent to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,12 +38,34 @@ async def get_event_markets(slug: str):
 
         if not events:
             print(f"ERROR: Event '{slug}' not found!")
+            print("\nSearching for similar events...")
+
+            # Search for any bitcoin events
+            response2 = await client.get(
+                f"{GAMMA_URL}/events",
+                params={"active": "true", "closed": "false", "limit": 50}
+            )
+            all_events = response2.json()
+
+            print(f"\nFound {len(all_events)} active events. BTC-related:")
+            for e in all_events:
+                title = e.get("title", "").lower()
+                if "bitcoin" in title or "btc" in title:
+                    print(f"  - {e.get('title')}")
+                    print(f"    slug: {e.get('slug')}")
             return None
 
         event = events[0]
         print(f"Event: {event.get('title')}")
-        print(f"Markets: {len(event.get('markets', []))}")
+        print(f"Total Markets in event: {len(event.get('markets', []))}")
         print("=" * 70)
+
+        # Debug: print raw first market
+        markets = event.get("markets", [])
+        if markets:
+            print("\nRAW FIRST MARKET DATA:")
+            print(json.dumps(markets[0], indent=2, default=str)[:2000])
+            print("=" * 70)
 
         return event
 
@@ -52,12 +75,21 @@ def parse_markets(event: dict):
     markets = []
     now = datetime.now(timezone.utc)
 
-    for m in event.get("markets", []):
+    print(f"\nCurrent UTC time: {now.isoformat()}")
+    print(f"Parsing {len(event.get('markets', []))} markets...\n")
+
+    for i, m in enumerate(event.get("markets", [])):
         question = m.get("question", "")
         condition_id = m.get("conditionId", "")
         clob_tokens = m.get("clobTokenIds", [])
         end_date_str = m.get("endDate", "")
         closed = m.get("closed", False)
+        active = m.get("active", True)
+
+        print(f"\nMarket {i+1}: {question[:60]}")
+        print(f"  closed={closed}, active={active}")
+        print(f"  endDate={end_date_str}")
+        print(f"  clobTokenIds={len(clob_tokens)} tokens")
 
         # Parse end time
         end_time = None
@@ -66,28 +98,30 @@ def parse_markets(event: dict):
                 if end_date_str.endswith("Z"):
                     end_date_str = end_date_str[:-1] + "+00:00"
                 end_time = datetime.fromisoformat(end_date_str)
-            except:
-                pass
+                print(f"  Parsed end_time: {end_time.isoformat()}")
+            except Exception as e:
+                print(f"  Failed to parse end time: {e}")
 
         # Check if tradeable
         if closed:
-            print(f"  CLOSED: {question[:50]}")
+            print(f"  -> SKIPPED: Market is closed")
             continue
 
         if not end_time:
-            print(f"  NO END TIME: {question[:50]}")
+            print(f"  -> SKIPPED: No end time")
             continue
 
-        if end_time <= now:
-            print(f"  EXPIRED: {question[:50]}")
+        time_diff = (end_time - now).total_seconds()
+        if time_diff <= 0:
+            print(f"  -> SKIPPED: Expired ({time_diff/60:.1f} minutes ago)")
             continue
 
         if len(clob_tokens) < 2:
-            print(f"  NO TOKENS: {question[:50]}")
+            print(f"  -> SKIPPED: Not enough tokens ({len(clob_tokens)})")
             continue
 
         # This market is tradeable!
-        minutes_left = (end_time - now).total_seconds() / 60
+        minutes_left = time_diff / 60
         markets.append({
             "question": question,
             "condition_id": condition_id,
@@ -97,11 +131,9 @@ def parse_markets(event: dict):
             "minutes_left": minutes_left,
         })
 
-        print(f"\n  TRADEABLE: {question}")
-        print(f"    Time left: {minutes_left:.1f} minutes")
-        print(f"    Condition: {condition_id}")
-        print(f"    YES token: {clob_tokens[0]}")
-        print(f"    NO token:  {clob_tokens[1]}")
+        print(f"  -> TRADEABLE! {minutes_left:.1f} minutes left")
+        print(f"     YES: {clob_tokens[0][:50]}...")
+        print(f"     NO:  {clob_tokens[1][:50]}...")
 
     return markets
 
