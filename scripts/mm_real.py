@@ -158,7 +158,14 @@ class RealMarketMaker:
     def place_order(self, token_id: str, price: float, size: float, side: str) -> Optional[str]:
         """Place a maker order."""
         try:
-            args = OrderArgs(token_id=token_id, price=price, size=size, side=side)
+            # 15-minute markets require fee_rate_bps=1000 (maker fee rate)
+            args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=side,
+                fee_rate_bps=1000,  # Required for 15-min crypto markets
+            )
             signed = self.client.create_order(args)
             resp = self.client.post_order(signed, OrderType.GTC)
             order_id = resp.get("orderID") or resp.get("id")
@@ -305,7 +312,7 @@ class RealMarketMaker:
                     # Buy NO to hedge
                     try:
                         args = OrderArgs(token_id=market["no_token"], price=hedge_price,
-                                        size=hedge_size, side=BUY)
+                                        size=hedge_size, side=BUY, fee_rate_bps=1000)
                         signed = self.client.create_order(args)
                         self.client.post_order(signed, OrderType.FOK)
                     except:
@@ -323,7 +330,7 @@ class RealMarketMaker:
                     # Buy YES to hedge
                     try:
                         args = OrderArgs(token_id=market["yes_token"], price=hedge_price,
-                                        size=hedge_size, side=BUY)
+                                        size=hedge_size, side=BUY, fee_rate_bps=1000)
                         signed = self.client.create_order(args)
                         self.client.post_order(signed, OrderType.FOK)
                     except:
