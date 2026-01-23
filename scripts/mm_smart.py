@@ -41,8 +41,8 @@ ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
 MIN_PROFIT_LOW_VOL = 1.0   # 1¢ minimum to cover slippage
 MIN_PROFIT_HIGH_VOL = 1.5  # 1.5¢ minimum during high volatility
 SLIPPAGE_BUFFER = 0.5      # Assume 0.5¢ slippage on hedge
-MAKER_TIMEOUT = 15  # Shorter timeout - if no fill, try again
-AGGRESSIVE_THRESHOLD = 0.02  # If profit >= 2¢, take both sides (guaranteed fill)
+MAKER_TIMEOUT = 10  # Short timeout
+AGGRESSIVE_THRESHOLD = 0.01  # If profit >= 1¢, use taker-taker (ALWAYS use guaranteed fills)
 DASHBOARD_INTERVAL = 2 * 60 * 60  # 2 hours
 
 
@@ -364,17 +364,19 @@ class HybridMM:
         m = opp["market"]
         size = ORDER_SIZE
 
-        # If profit is high enough, use taker-taker for guaranteed fills
-        if opp["profit"] >= AGGRESSIVE_THRESHOLD:
-            yes_ob = self.get_ob(m["yes_token"])
-            no_ob = self.get_ob(m["no_token"])
-            if yes_ob["asks"] and no_ob["asks"]:
-                yes_ask = yes_ob["asks"][0][0]
-                no_ask = no_ob["asks"][0][0]
-                taker_profit = 1.0 - yes_ask - no_ask
-                if taker_profit >= 0.01:  # At least 1¢ profit as taker-taker
-                    print(f"\n   💎 High profit - using TAKER-TAKER for guaranteed fill")
-                    return self.execute_taker_taker(m, yes_ask, no_ask)
+        # ALWAYS use taker-taker for guaranteed fills (maker orders are too risky)
+        yes_ob = self.get_ob(m["yes_token"])
+        no_ob = self.get_ob(m["no_token"])
+        if yes_ob["asks"] and no_ob["asks"]:
+            yes_ask = yes_ob["asks"][0][0]
+            no_ask = no_ob["asks"][0][0]
+            taker_profit = 1.0 - yes_ask - no_ask
+            if taker_profit >= 0.005:  # At least 0.5¢ profit as taker-taker
+                print(f"\n   ⚡ Using TAKER-TAKER for GUARANTEED fill (no risk)")
+                return self.execute_taker_taker(m, yes_ask, no_ask)
+            else:
+                print(f"\n   ❌ Taker profit too low ({taker_profit*100:.1f}¢) - skipping")
+                return False
 
         print(f"\n{'='*60}")
         print(f"🚀 HYBRID TRADE - {m['hour']} ET")
