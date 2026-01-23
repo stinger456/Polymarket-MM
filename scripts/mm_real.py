@@ -172,6 +172,7 @@ class RealMarketMaker:
                 }
             return order_id
         except Exception as e:
+            print(f"\n   ❌ Order failed: {e}")
             return None
 
     def check_fills(self):
@@ -236,7 +237,8 @@ class RealMarketMaker:
         no_ob = self.get_ob(market["no_token"])
 
         if not yes_ob["bids"] or not yes_ob["asks"] or not no_ob["bids"] or not no_ob["asks"]:
-            return
+            print(f"\n   ⚠️ Incomplete orderbook - YES bids:{len(yes_ob['bids'])} asks:{len(yes_ob['asks'])} | NO bids:{len(no_ob['bids'])} asks:{len(no_ob['asks'])}")
+            return None
 
         # Calculate mid prices
         yes_mid = self.get_mid_price(yes_ob)
@@ -408,6 +410,8 @@ class RealMarketMaker:
         scan = 0
         last_quote_time = 0
         last_dashboard = time.time()
+        verbose_interval = 30  # Show verbose info every 30 seconds
+        last_verbose = 0
 
         try:
             while True:
@@ -427,9 +431,52 @@ class RealMarketMaker:
                     time.sleep(5)
                     continue
 
-                # Use first market
+                # Use first market (soonest expiry with time left)
                 market = markets[0]
                 self.current_market = market
+
+                # Verbose output every 30 seconds
+                if time.time() - last_verbose > verbose_interval:
+                    print(f"\n\n{'─'*60}")
+                    print(f"📊 MARKET: {market['question']}")
+                    print(f"   Time: {market['time']} ET | {market['mins_left']:.1f} mins left")
+                    print(f"   Slug: {market['slug']}")
+
+                    # Show orderbook
+                    yes_ob = self.get_ob(market["yes_token"])
+                    no_ob = self.get_ob(market["no_token"])
+
+                    print(f"\n   📈 YES Orderbook:")
+                    if yes_ob["bids"]:
+                        print(f"      Best Bid: ${yes_ob['bids'][0][0]:.2f} x {yes_ob['bids'][0][1]:.0f}")
+                    else:
+                        print(f"      Best Bid: EMPTY")
+                    if yes_ob["asks"]:
+                        print(f"      Best Ask: ${yes_ob['asks'][0][0]:.2f} x {yes_ob['asks'][0][1]:.0f}")
+                    else:
+                        print(f"      Best Ask: EMPTY")
+
+                    print(f"\n   📉 NO Orderbook:")
+                    if no_ob["bids"]:
+                        print(f"      Best Bid: ${no_ob['bids'][0][0]:.2f} x {no_ob['bids'][0][1]:.0f}")
+                    else:
+                        print(f"      Best Bid: EMPTY")
+                    if no_ob["asks"]:
+                        print(f"      Best Ask: ${no_ob['asks'][0][0]:.2f} x {no_ob['asks'][0][1]:.0f}")
+                    else:
+                        print(f"      Best Ask: EMPTY")
+
+                    # Show implied probability
+                    if yes_ob["asks"] and no_ob["asks"]:
+                        taker_cost = yes_ob["asks"][0][0] + no_ob["asks"][0][0]
+                        print(f"\n   💰 Taker total: ${taker_cost:.2f} (profit if <$1: ${1-taker_cost:.2f})")
+
+                    if yes_ob["bids"] and no_ob["bids"]:
+                        maker_revenue = yes_ob["bids"][0][0] + no_ob["bids"][0][0]
+                        print(f"   💰 If we post at best bid: ${maker_revenue:.2f}")
+
+                    print(f"{'─'*60}\n")
+                    last_verbose = time.time()
 
                 # Check for fills
                 fills = self.check_fills()
@@ -446,9 +493,15 @@ class RealMarketMaker:
                     quotes = self.post_quotes(market)
                     last_quote_time = time.time()
 
+                    # Show what we posted
+                    if quotes and quotes.get("yes_order") and quotes.get("no_order"):
+                        pass  # Orders posted successfully
+                    elif quotes:
+                        print(f"\n   ⚠️ Order posting issue - YES:{quotes.get('yes_order')} NO:{quotes.get('no_order')}")
+
                 # Show status
                 status = self.show_status(quotes)
-                print(f"\r[{ts}] #{scan} | {status}   ", end="", flush=True)
+                print(f"\r[{ts}] #{scan} | {market['time']} | {status}   ", end="", flush=True)
 
                 time.sleep(1)
 
