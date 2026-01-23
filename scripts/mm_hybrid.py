@@ -44,6 +44,7 @@ CHAIN_ID = 137
 ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
 MIN_PROFIT_CENTS = 0.5  # Minimum 0.5 cent profit per share
 MAKER_ORDER_TIMEOUT = 30  # How long to wait for maker fill
+DASHBOARD_INTERVAL = 2 * 60 * 60  # Show dashboard every 2 hours (in seconds)
 
 
 @dataclass
@@ -77,6 +78,9 @@ class HybridMarketMaker:
         self.client.set_api_creds(creds)
 
         self.stats = TradeStats()
+        self.start_time = time.time()
+        self.last_dashboard_time = time.time()
+        self.starting_balance = 20.0  # Assumed starting balance
         print(f"✓ Connected: {safe_address[:20]}...")
 
     def get_markets(self) -> List[Dict]:
