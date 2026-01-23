@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-DELTA NEUTRAL 15-MINUTE MARKET MAKER
+DELTA NEUTRAL 15-MINUTE MARKET MAKER v2
 
-ALWAYS stays hedged - equal YES and NO positions at all times.
+FIXED: Only posts ONE side at a time to ensure cash for hedging.
 
 Strategy:
-1. Post a maker bid on YES
-2. When YES fills -> IMMEDIATELY buy equal NO (taker) to hedge
-3. Post a maker bid on NO
-4. When NO fills -> IMMEDIATELY buy equal YES (taker) to hedge
+1. Post a maker bid on ONE side (alternating YES/NO)
+2. When filled -> IMMEDIATELY hedge with the other side (taker)
+3. Post next order on opposite side
+4. Repeat
+
+This ensures we ALWAYS have cash to hedge after a fill.
 
 Profit = maker rebate + any spread captured
 Risk = ZERO (always hedged, positions cancel out at expiration)
@@ -39,7 +41,6 @@ FEE_RATE_BPS = 1000  # Required for 15-min markets
 
 # ============== CONFIG ==============
 ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
-SPREAD_FROM_BEST = 0.01  # Post 1c below best bid to be competitive
 # ====================================
 
 
@@ -65,16 +66,17 @@ class DeltaNeutralMM:
         self.no_shares = 0.0
 
         # Track for P&L
-        self.hedged_pairs = 0  # Number of YES+NO pairs we hold
-        self.total_pair_cost = 0.0  # Total cost of all pairs
+        self.hedged_pairs = 0.0
+        self.total_pair_cost = 0.0
 
-        # Active orders
-        self.yes_order_id = None
-        self.no_order_id = None
-        self.yes_order_price = 0.0
-        self.no_order_price = 0.0
-        self.yes_order_size = 0.0
-        self.no_order_size = 0.0
+        # SINGLE active order (only ONE side at a time!)
+        self.active_order_id = None
+        self.active_order_side = None  # "YES" or "NO"
+        self.active_order_price = 0.0
+        self.active_order_size = 0.0
+
+        # Which side to post next (alternates)
+        self.next_side = "YES"
 
         # Stats
         self.total_volume = 0.0
@@ -85,7 +87,7 @@ class DeltaNeutralMM:
         self.current_market = None
 
         print(f"Connected: {safe_address[:20]}...")
-        print(f"Delta Neutral Mode: Always hedged, zero directional risk")
+        print(f"Delta Neutral v2: ONE order at a time, always cash for hedge")
 
     def get_15min_markets(self) -> List[Dict]:
         """Get active 15-minute BTC markets."""
@@ -248,77 +250,89 @@ class DeltaNeutralMM:
                 return True
             return False
 
-    def post_quotes(self, market: Dict):
-        """Post maker bids on both sides."""
-        yes_ob = self.get_ob(market["yes_token"])
-        no_ob = self.get_ob(market["no_token"])
+    def post_single_quote(self, market: Dict) -> Optional[Dict]:
+        """Post maker bid on ONE side only (alternating)."""
 
-        if not yes_ob["bids"] or not no_ob["bids"]:
+        # Don't post if we already have an active order
+        if self.active_order_id:
             return None
 
-        # Post at best bid to be at top of queue
-        yes_price = yes_ob["bids"][0][0]
-        no_price = no_ob["bids"][0][0]
+        # Determine which side to post
+        side = self.next_side
 
-        # Ensure prices are valid
-        yes_price = max(0.01, min(0.99, yes_price))
-        no_price = max(0.01, min(0.99, no_price))
+        if side == "YES":
+            token_id = market["yes_token"]
+            ob = self.get_ob(token_id)
+        else:
+            token_id = market["no_token"]
+            ob = self.get_ob(token_id)
 
-        # Cancel old orders first
-        self.cancel_order(self.yes_order_id)
-        self.cancel_order(self.no_order_id)
-        
-        time.sleep(0.5)  # Brief pause to let cancels process
+        if not ob["bids"]:
+            return None
 
-        # Post new orders
-        self.yes_order_id = self.place_maker_bid(market["yes_token"], yes_price, ORDER_SIZE)
-        self.no_order_id = self.place_maker_bid(market["no_token"], no_price, ORDER_SIZE)
+        # Post at best bid price
+        price = ob["bids"][0][0]
+        price = max(0.01, min(0.99, price))
 
-        self.yes_order_price = yes_price
-        self.no_order_price = no_price
-        self.yes_order_size = ORDER_SIZE
-        self.no_order_size = ORDER_SIZE
+        # Post the order
+        order_id = self.place_maker_bid(token_id, price, ORDER_SIZE)
 
-        return {
-            "yes_bid": yes_price,
-            "no_bid": no_price,
-            "total": yes_price + no_price,
-        }
+        if order_id:
+            self.active_order_id = order_id
+            self.active_order_side = side
+            self.active_order_price = price
+            self.active_order_size = ORDER_SIZE
 
-    def check_and_hedge_fills(self, market: Dict):
-        """Check for fills and IMMEDIATELY hedge them."""
+            print(f"\n   Posted {side} bid @ ${price:.2f} x {ORDER_SIZE}")
 
-        # Check YES order
-        if self.yes_order_id:
-            filled = self.check_order_filled(self.yes_order_id)
-            if filled > 0:
-                print(f"\n   MAKER FILL: {filled:.0f} YES @ ${self.yes_order_price:.2f}")
-                self.yes_shares += filled
-                self.maker_fills += 1
-                self.total_volume += filled * self.yes_order_price
+            return {
+                "side": side,
+                "price": price,
+                "size": ORDER_SIZE,
+            }
 
-                # IMMEDIATELY hedge
-                self.hedge_immediately("YES", filled, self.yes_order_price, market)
+        return None
 
-                # Clear the order
-                self.cancel_order(self.yes_order_id)
-                self.yes_order_id = None
+    def check_fill_and_hedge(self, market: Dict) -> bool:
+        """Check if our single order filled, and if so, hedge it."""
 
-        # Check NO order
-        if self.no_order_id:
-            filled = self.check_order_filled(self.no_order_id)
-            if filled > 0:
-                print(f"\n   MAKER FILL: {filled:.0f} NO @ ${self.no_order_price:.2f}")
-                self.no_shares += filled
-                self.maker_fills += 1
-                self.total_volume += filled * self.no_order_price
+        if not self.active_order_id:
+            return False
 
-                # IMMEDIATELY hedge
-                self.hedge_immediately("NO", filled, self.no_order_price, market)
+        filled = self.check_order_filled(self.active_order_id)
 
-                # Clear the order
-                self.cancel_order(self.no_order_id)
-                self.no_order_id = None
+        if filled <= 0:
+            return False
+
+        side = self.active_order_side
+        fill_price = self.active_order_price
+
+        print(f"\n   MAKER FILL: {filled:.0f} {side} @ ${fill_price:.2f}")
+
+        # Update position
+        if side == "YES":
+            self.yes_shares += filled
+        else:
+            self.no_shares += filled
+
+        self.maker_fills += 1
+        self.total_volume += filled * fill_price
+
+        # Cancel remaining order (in case partial fill)
+        self.cancel_order(self.active_order_id)
+        self.active_order_id = None
+
+        # IMMEDIATELY hedge with the opposite side
+        hedged = self.hedge_immediately(side, filled, fill_price, market)
+
+        if hedged:
+            # Switch to opposite side for next order
+            self.next_side = "NO" if side == "YES" else "YES"
+        else:
+            print(f"   WARNING: Failed to hedge! Will retry...")
+            # Try to hedge again on next loop
+
+        return hedged
 
     def calculate_pnl(self) -> Dict:
         """Calculate P&L - should always be positive for delta neutral."""
@@ -339,7 +353,7 @@ class DeltaNeutralMM:
             "total": spread_profit + est_rebates,
         }
 
-    def show_status(self, quotes: Dict = None):
+    def show_status(self):
         """Show current status."""
         pnl = self.calculate_pnl()
 
@@ -349,12 +363,12 @@ class DeltaNeutralMM:
         else:
             delta_status = f"UNHEDGED:{delta:+.0f}"
 
-        if quotes:
-            quote_str = f"Y${quotes['yes_bid']:.2f} N${quotes['no_bid']:.2f}"
+        if self.active_order_id:
+            order_str = f"Bid {self.active_order_side}@${self.active_order_price:.2f}"
         else:
-            quote_str = "..."
+            order_str = "No order"
 
-        return f"{quote_str} | Pairs:{pnl['pairs']:.0f} | {delta_status} | ${pnl['total']:+.2f}"
+        return f"{order_str} | Pairs:{pnl['pairs']:.0f} | {delta_status} | ${pnl['total']:+.2f}"
 
     def show_dashboard(self):
         """Full dashboard."""
@@ -362,22 +376,25 @@ class DeltaNeutralMM:
         pnl = self.calculate_pnl()
 
         print(f"\n\n{'='*60}")
-        print(f"DELTA NEUTRAL MARKET MAKER - FINAL REPORT")
+        print(f"DELTA NEUTRAL MARKET MAKER v2 - FINAL REPORT")
         print(f"{'='*60}")
         print(f"   Runtime:       {runtime:.1f} minutes")
         print(f"   Volume:        ${self.total_volume:.2f}")
         print(f"   Maker fills:   {self.maker_fills}")
-        print(f"   Taker fills:   {self.taker_fills}")
+        print(f"   Taker hedges:  {self.taker_fills}")
         print(f"   {'-'*40}")
         print(f"   YES shares:    {self.yes_shares:.0f}")
         print(f"   NO shares:     {self.no_shares:.0f}")
         delta = self.yes_shares - self.no_shares
         if abs(delta) < 0.1:
-            print(f"   Delta:         NEUTRAL (0)")
+            print(f"   Delta:         NEUTRAL (perfectly hedged)")
         else:
-            print(f"   Delta:         {delta:+.0f} (UNHEDGED)")
+            print(f"   Delta:         {delta:+.0f} (UNHEDGED - check positions!)")
         print(f"   {'-'*40}")
         print(f"   Hedged pairs:  {pnl['pairs']:.0f}")
+        if pnl['pairs'] > 0:
+            avg_cost = pnl['cost'] / pnl['pairs']
+            print(f"   Avg pair cost: ${avg_cost:.3f}")
         print(f"   Total cost:    ${pnl['cost']:.2f}")
         print(f"   Value at exp:  ${pnl['value']:.2f}")
         print(f"   Spread profit: ${pnl['spread_profit']:+.2f}")
@@ -389,16 +406,14 @@ class DeltaNeutralMM:
     def run(self):
         """Main loop."""
         print(f"\n{'='*60}")
-        print("DELTA NEUTRAL 15-MINUTE MARKET MAKER")
-        print("When one side fills -> immediately buy the other side")
+        print("DELTA NEUTRAL 15-MINUTE MARKET MAKER v2")
+        print("ONE order at a time -> fill -> hedge -> repeat")
         print(f"Order size: ${ORDER_SIZE}")
         print("Press Ctrl+C to stop")
         print(f"{'='*60}")
 
         scan = 0
-        last_quote_time = 0
         last_verbose = 0
-        QUOTE_REFRESH = 10
 
         try:
             while True:
@@ -430,25 +445,22 @@ class DeltaNeutralMM:
                     print(f"{'-'*50}\n")
                     last_verbose = time.time()
 
-                # Check for fills and hedge immediately
-                self.check_and_hedge_fills(market)
+                # Step 1: Check if our order filled, and hedge if so
+                self.check_fill_and_hedge(market)
 
-                # Post/refresh quotes
-                quotes = None
-                if time.time() - last_quote_time > QUOTE_REFRESH:
-                    quotes = self.post_quotes(market)
-                    last_quote_time = time.time()
+                # Step 2: If no active order, post one
+                if not self.active_order_id:
+                    self.post_single_quote(market)
 
                 # Show status
-                status = self.show_status(quotes)
+                status = self.show_status()
                 print(f"\r[{ts}] #{scan} | {market['time']} | {status}   ", end="", flush=True)
 
                 time.sleep(2)
 
         except KeyboardInterrupt:
             print(f"\n\nStopping...")
-            self.cancel_order(self.yes_order_id)
-            self.cancel_order(self.no_order_id)
+            self.cancel_order(self.active_order_id)
             self.show_dashboard()
 
             if self.hedged_pairs > 0:
