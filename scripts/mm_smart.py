@@ -38,9 +38,10 @@ CHAIN_ID = 137
 
 # Config
 ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
-MIN_PROFIT_LOW_VOL = 0.0   # 0¢ = breakeven OK during low volatility
-MIN_PROFIT_HIGH_VOL = 0.3  # 0.3¢ minimum during high volatility
-MAKER_TIMEOUT = 30  # Seconds to wait for maker fill
+MIN_PROFIT_LOW_VOL = 1.0   # 1¢ minimum to cover slippage
+MIN_PROFIT_HIGH_VOL = 1.5  # 1.5¢ minimum during high volatility
+SLIPPAGE_BUFFER = 0.5      # Assume 0.5¢ slippage on hedge
+MAKER_TIMEOUT = 45  # Seconds to wait for maker fill (longer = more fills)
 DASHBOARD_INTERVAL = 2 * 60 * 60  # 2 hours
 
 
@@ -161,13 +162,13 @@ class HybridMM:
             self.volatility = "LOW"
 
     def get_min_profit(self) -> float:
-        """Get minimum profit threshold based on volatility."""
+        """Get minimum profit threshold based on volatility (includes slippage buffer)."""
         if self.volatility == "HIGH":
-            return MIN_PROFIT_HIGH_VOL / 100  # 0.3¢ = 0.003
+            return (MIN_PROFIT_HIGH_VOL + SLIPPAGE_BUFFER) / 100  # 2¢ total
         elif self.volatility == "MEDIUM":
-            return 0.1 / 100  # 0.1¢ = 0.001
+            return (MIN_PROFIT_LOW_VOL + SLIPPAGE_BUFFER) / 100  # 1.5¢ total
         else:
-            return MIN_PROFIT_LOW_VOL / 100  # 0¢ = breakeven OK
+            return (MIN_PROFIT_LOW_VOL) / 100  # 1¢ minimum
 
     def find_hybrid_opportunity(self, market: Dict) -> Optional[Dict]:
         """
@@ -342,23 +343,32 @@ class HybridMM:
 
         print(f"   Hedge @ ${hedge_price:.2f}")
 
-        if self.place_fok(opp["hedge_token"], hedge_price, size):
+        # Try hedge with 1¢ buffer for slippage
+        hedge_price_with_buffer = round(hedge_price + 0.01, 2)
+
+        if self.place_fok(opp["hedge_token"], hedge_price_with_buffer, size):
+            # Recalculate actual profit with the price we paid
+            actual_cost = opp["maker_price"] + hedge_price_with_buffer
+            actual_profit = (1.0 - actual_cost) * size
+
             self.total_pnl += actual_profit
             self.total_trades += 1
-            self.wins += 1
+            if actual_profit > 0:
+                self.wins += 1  # Only count as win if actually profitable
 
-            print(f"\n   ✅ HEDGED!")
+            status = "✅ PROFIT" if actual_profit > 0 else "⚠️ LOSS"
+            print(f"\n   {status} HEDGED @ ${hedge_price_with_buffer:.2f}")
             print(f"   💰 P&L: ${actual_profit:+.2f}")
             self.show_stats()
-            return True
+            return actual_profit > 0
         else:
             # Emergency: try at higher price
             print(f"   ⚠️ FOK failed, trying emergency hedge...")
-            for _ in range(3):
+            for i in range(3):
                 time.sleep(0.3)
                 hedge_ob = self.get_ob(opp["hedge_token"])
                 if hedge_ob["asks"]:
-                    emergency_price = hedge_ob["asks"][0][0]
+                    emergency_price = round(hedge_ob["asks"][0][0] + 0.01, 2)  # Add buffer
                     if self.place_fok(opp["hedge_token"], emergency_price, size):
                         actual_cost = opp["maker_price"] + emergency_price
                         actual_profit = (1.0 - actual_cost) * size
@@ -366,7 +376,8 @@ class HybridMM:
                         self.total_trades += 1
                         if actual_profit > 0:
                             self.wins += 1
-                        print(f"   ✅ Emergency hedge @ ${emergency_price:.2f}")
+                        status = "✅ PROFIT" if actual_profit > 0 else "⚠️ LOSS"
+                        print(f"   {status} Emergency hedge @ ${emergency_price:.2f}")
                         print(f"   💰 P&L: ${actual_profit:+.2f}")
                         self.show_stats()
                         return actual_profit > 0
@@ -405,10 +416,11 @@ class HybridMM:
     def run(self):
         """Main loop."""
         print(f"\n{'='*60}")
-        print("HYBRID MARKET MAKER (ADAPTIVE)")
+        print("HYBRID MARKET MAKER (PROFITABLE)")
         print("Maker on one side → Instant taker hedge")
-        print(f"Size: ${ORDER_SIZE}")
-        print(f"Low vol: {MIN_PROFIT_LOW_VOL}¢ min | High vol: {MIN_PROFIT_HIGH_VOL}¢ min")
+        print(f"Size: ${ORDER_SIZE} | Slippage buffer: {SLIPPAGE_BUFFER}¢")
+        print(f"Min profit: {MIN_PROFIT_LOW_VOL}¢ (low vol) | {MIN_PROFIT_HIGH_VOL}¢ (high vol)")
+        print("Only takes trades with REAL profit margin")
         print("Press Ctrl+C to stop")
         print(f"{'='*60}")
 
