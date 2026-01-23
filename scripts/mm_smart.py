@@ -284,10 +284,32 @@ class HybridMM:
         except:
             return False, 0
 
+    def emergency_sell(self, token_id: str, size: float) -> Tuple[bool, float]:
+        """IMMEDIATELY sell a position at best bid to cut losses."""
+        try:
+            ob = self.get_ob(token_id)
+            if ob["bids"]:
+                sell_price = ob["bids"][0][0]
+                # Use SELL side
+                from py_clob_client.order_builder.constants import SELL
+                args = OrderArgs(token_id=token_id, price=sell_price, size=size, side=SELL)
+                signed = self.client.create_order(args)
+                resp = self.client.post_order(signed, OrderType.FOK)
+                oid = resp.get("orderID") or resp.get("id")
+                if oid:
+                    order = self.client.get_order(oid)
+                    filled = float(order.get("size_matched", 0))
+                    if filled >= size * 0.95:
+                        return True, sell_price
+            return False, 0
+        except Exception as e:
+            print(f"   Emergency sell error: {e}")
+            return False, 0
+
     def execute_taker_taker(self, market: Dict, yes_ask: float, no_ask: float) -> bool:
         """
         Execute taker-taker trade (both sides at ask = guaranteed fill).
-        Used when profit margin is high enough to justify taking both sides.
+        If one side fails → IMMEDIATELY SELL to cut losses.
         """
         size = ORDER_SIZE
         total_cost = yes_ask + no_ask
@@ -306,7 +328,7 @@ class HybridMM:
         yes_price = round(yes_ask + 0.01, 2)
         yes_filled = self.place_fok(market["yes_token"], yes_price, size)
         if not yes_filled:
-            print(f"   ❌ YES order failed - aborting")
+            print(f"   ❌ YES order failed - aborting (no position)")
             return False
 
         print(f"   ✓ YES filled @ ${yes_price:.2f}")
@@ -314,27 +336,19 @@ class HybridMM:
         no_price = round(no_ask + 0.01, 2)
         no_filled = self.place_fok(market["no_token"], no_price, size)
         if not no_filled:
-            print(f"   ❌ NO order failed - trying emergency hedge...")
-            # Try emergency hedge at higher prices
-            for attempt in range(5):
-                time.sleep(0.2)
-                no_ob = self.get_ob(market["no_token"])
-                if no_ob["asks"]:
-                    emergency_price = round(no_ob["asks"][0][0] + 0.02 + (attempt * 0.01), 2)
-                    if self.place_fok(market["no_token"], emergency_price, size):
-                        actual_cost = yes_price + emergency_price
-                        actual_profit = (1.0 - actual_cost) * size
-                        self.total_pnl += actual_profit
-                        self.total_trades += 1
-                        if actual_profit > 0:
-                            self.wins += 1
-                        status = "✅" if actual_profit > 0 else "⚠️"
-                        print(f"   {status} Emergency hedge @ ${emergency_price:.2f}")
-                        print(f"   💰 P&L: ${actual_profit:+.2f}")
-                        self.show_stats()
-                        return actual_profit > 0
-            print(f"   ❌ HEDGE FAILED - UNHEDGED POSITION!")
-            self.total_trades += 1
+            print(f"   ❌ NO order failed - EMERGENCY SELL YES NOW!")
+
+            # IMMEDIATELY sell YES to cut losses - don't wait!
+            sold, sell_price = self.emergency_sell(market["yes_token"], size)
+            if sold:
+                loss = (yes_price - sell_price) * size
+                self.total_pnl -= loss
+                self.total_trades += 1
+                print(f"   🔴 SOLD YES @ ${sell_price:.2f} | Loss: ${loss:.2f}")
+                self.show_stats()
+            else:
+                print(f"   ❌ EMERGENCY SELL FAILED - MANUAL INTERVENTION NEEDED!")
+                self.total_trades += 1
             return False
 
         print(f"   ✓ NO filled @ ${no_price:.2f}")
