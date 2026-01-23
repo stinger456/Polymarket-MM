@@ -82,36 +82,51 @@ class RealMarketMaker:
         print(f"✓ Connected: {safe_address[:20]}...")
 
     def get_15min_markets(self) -> List[Dict]:
-        """Get active 15-minute BTC markets."""
+        """Get active 15-minute BTC markets using correct slug pattern."""
         markets = []
+        et = ZoneInfo("America/New_York")
+        now = datetime.now(et)
 
-        try:
-            with httpx.Client(timeout=10) as http:
-                # Search for active markets
-                resp = http.get(f"{GAMMA_API}/markets", params={
-                    "active": "true",
-                    "closed": "false",
-                    "limit": 100
-                })
-                all_markets = resp.json()
+        # 15-minute markets use Unix timestamp in slug: btc-updown-15m-{timestamp}
+        # Try current and next few 15-minute intervals
+        for offset in range(8):  # Check next 2 hours
+            # Round to 15-minute intervals
+            dt = now + timedelta(minutes=offset * 15)
+            dt = dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
 
-                for mkt in all_markets:
-                    question = mkt.get("question", "").lower()
-                    # Look for 15-minute BTC markets
-                    if ("bitcoin" in question or "btc" in question) and \
-                       ("15" in question or "fifteen" in question):
-                        tokens = mkt.get("clobTokenIds", [])
-                        if isinstance(tokens, str):
-                            tokens = json.loads(tokens)
-                        if len(tokens) >= 2:
-                            markets.append({
-                                "yes_token": tokens[0],
-                                "no_token": tokens[1],
-                                "question": mkt.get("question", "")[:50],
-                                "condition_id": mkt.get("conditionId", ""),
-                            })
-        except Exception as e:
-            pass
+            # Convert to Unix timestamp
+            timestamp = int(dt.timestamp())
+
+            slug = f"btc-updown-15m-{timestamp}"
+
+            try:
+                with httpx.Client(timeout=10) as http:
+                    resp = http.get(f"{GAMMA_API}/events", params={"slug": slug})
+                    events = resp.json()
+
+                    if events and len(events) > 0:
+                        event = events[0]
+                        for mkt in event.get("markets", []):
+                            if mkt.get("closed"):
+                                continue
+                            tokens = mkt.get("clobTokenIds", [])
+                            if isinstance(tokens, str):
+                                tokens = json.loads(tokens)
+                            if len(tokens) >= 2:
+                                end_dt = dt + timedelta(minutes=15)
+                                mins_left = (end_dt - now).total_seconds() / 60
+
+                                if mins_left > 2:  # Skip if about to expire
+                                    markets.append({
+                                        "yes_token": tokens[0],
+                                        "no_token": tokens[1],
+                                        "question": mkt.get("question", "")[:40],
+                                        "time": dt.strftime("%H:%M"),
+                                        "mins_left": mins_left,
+                                        "slug": slug,
+                                    })
+            except Exception as e:
+                pass
 
         return markets
 
