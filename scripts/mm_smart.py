@@ -41,7 +41,8 @@ ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
 MIN_PROFIT_LOW_VOL = 1.0   # 1¢ minimum to cover slippage
 MIN_PROFIT_HIGH_VOL = 1.5  # 1.5¢ minimum during high volatility
 SLIPPAGE_BUFFER = 0.5      # Assume 0.5¢ slippage on hedge
-MAKER_TIMEOUT = 45  # Seconds to wait for maker fill (longer = more fills)
+MAKER_TIMEOUT = 15  # Shorter timeout - if no fill, try again
+AGGRESSIVE_THRESHOLD = 0.02  # If profit >= 2¢, take both sides (guaranteed fill)
 DASHBOARD_INTERVAL = 2 * 60 * 60  # 2 hours
 
 
@@ -283,6 +284,76 @@ class HybridMM:
         except:
             return False, 0
 
+    def execute_taker_taker(self, market: Dict, yes_ask: float, no_ask: float) -> bool:
+        """
+        Execute taker-taker trade (both sides at ask = guaranteed fill).
+        Used when profit margin is high enough to justify taking both sides.
+        """
+        size = ORDER_SIZE
+        total_cost = yes_ask + no_ask
+        expected_profit = (1.0 - total_cost) * size
+
+        print(f"\n{'='*60}")
+        print(f"⚡ TAKER-TAKER TRADE - {market['hour']} ET (INSTANT FILL)")
+        print(f"{'='*60}")
+        print(f"   BUY YES @ ${yes_ask:.2f} (taker)")
+        print(f"   BUY NO  @ ${no_ask:.2f} (taker)")
+        print(f"   Total: ${total_cost:.3f} | Expected Profit: ${expected_profit:.2f}")
+
+        # Place both orders as FOK for instant fill (add 1¢ buffer)
+        print(f"\n   Executing both sides instantly...")
+
+        yes_price = round(yes_ask + 0.01, 2)
+        yes_filled = self.place_fok(market["yes_token"], yes_price, size)
+        if not yes_filled:
+            print(f"   ❌ YES order failed - aborting")
+            return False
+
+        print(f"   ✓ YES filled @ ${yes_price:.2f}")
+
+        no_price = round(no_ask + 0.01, 2)
+        no_filled = self.place_fok(market["no_token"], no_price, size)
+        if not no_filled:
+            print(f"   ❌ NO order failed - trying emergency hedge...")
+            # Try emergency hedge at higher prices
+            for attempt in range(5):
+                time.sleep(0.2)
+                no_ob = self.get_ob(market["no_token"])
+                if no_ob["asks"]:
+                    emergency_price = round(no_ob["asks"][0][0] + 0.02 + (attempt * 0.01), 2)
+                    if self.place_fok(market["no_token"], emergency_price, size):
+                        actual_cost = yes_price + emergency_price
+                        actual_profit = (1.0 - actual_cost) * size
+                        self.total_pnl += actual_profit
+                        self.total_trades += 1
+                        if actual_profit > 0:
+                            self.wins += 1
+                        status = "✅" if actual_profit > 0 else "⚠️"
+                        print(f"   {status} Emergency hedge @ ${emergency_price:.2f}")
+                        print(f"   💰 P&L: ${actual_profit:+.2f}")
+                        self.show_stats()
+                        return actual_profit > 0
+            print(f"   ❌ HEDGE FAILED - UNHEDGED POSITION!")
+            self.total_trades += 1
+            return False
+
+        print(f"   ✓ NO filled @ ${no_price:.2f}")
+
+        # Both filled - calculate actual P&L
+        actual_cost = yes_price + no_price
+        actual_profit = (1.0 - actual_cost) * size
+
+        self.total_pnl += actual_profit
+        self.total_trades += 1
+        if actual_profit > 0:
+            self.wins += 1
+
+        status = "✅ PROFIT" if actual_profit > 0 else "⚠️ LOSS"
+        print(f"\n   {status} BOTH SIDES FILLED!")
+        print(f"   💰 P&L: ${actual_profit:+.2f}")
+        self.show_stats()
+        return actual_profit > 0
+
     def execute_hybrid(self, opp: Dict) -> bool:
         """
         Execute hybrid trade:
@@ -292,6 +363,18 @@ class HybridMM:
         """
         m = opp["market"]
         size = ORDER_SIZE
+
+        # If profit is high enough, use taker-taker for guaranteed fills
+        if opp["profit"] >= AGGRESSIVE_THRESHOLD:
+            yes_ob = self.get_ob(m["yes_token"])
+            no_ob = self.get_ob(m["no_token"])
+            if yes_ob["asks"] and no_ob["asks"]:
+                yes_ask = yes_ob["asks"][0][0]
+                no_ask = no_ob["asks"][0][0]
+                taker_profit = 1.0 - yes_ask - no_ask
+                if taker_profit >= 0.01:  # At least 1¢ profit as taker-taker
+                    print(f"\n   💎 High profit - using TAKER-TAKER for guaranteed fill")
+                    return self.execute_taker_taker(m, yes_ask, no_ask)
 
         print(f"\n{'='*60}")
         print(f"🚀 HYBRID TRADE - {m['hour']} ET")
