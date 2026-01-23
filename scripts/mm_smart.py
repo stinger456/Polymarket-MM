@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HYBRID Market Maker - BTC Hourly
+HYBRID Market Maker - BTC Hourly (Adaptive)
 
 Strategy:
 1. Post MAKER order on one side (better price, inside the spread)
@@ -8,7 +8,9 @@ Strategy:
 3. When filled → INSTANTLY buy other side at ASK (taker, guaranteed fill)
 4. Result: Always hedged, capture maker edge
 
-Key: If maker doesn't fill, just cancel (no loss). When it fills, instant hedge.
+Adaptive:
+- Low volatility: Accept tighter spreads (0.1¢+ profit)
+- High volatility: Require wider spreads (0.5¢+ profit)
 """
 
 import os
@@ -18,6 +20,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Tuple
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,7 +38,8 @@ CHAIN_ID = 137
 
 # Config
 ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
-MIN_PROFIT_CENTS = 0.5  # Minimum 0.5 cent profit per share
+MIN_PROFIT_LOW_VOL = 0.1   # 0.1¢ minimum during low volatility
+MIN_PROFIT_HIGH_VOL = 0.5  # 0.5¢ minimum during high volatility
 MAKER_TIMEOUT = 30  # Seconds to wait for maker fill
 DASHBOARD_INTERVAL = 2 * 60 * 60  # 2 hours
 
@@ -63,6 +67,11 @@ class HybridMM:
         self.wins = 0
         self.start_time = time.time()
         self.last_dashboard = time.time()
+
+        # Volatility tracking (BTC prices over last 5 mins)
+        self.btc_prices = deque(maxlen=60)  # Store last 60 price checks
+        self.last_btc_price = None
+        self.volatility = "LOW"  # LOW, MEDIUM, HIGH
 
         print(f"✓ Connected: {safe_address[:20]}...")
 
@@ -118,12 +127,56 @@ class HybridMM:
         except:
             return {"bids": [], "asks": []}
 
+    def get_btc_price(self) -> Optional[float]:
+        """Get current BTC price from Binance."""
+        try:
+            with httpx.Client(timeout=5) as http:
+                resp = http.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"})
+                return float(resp.json()["price"])
+        except:
+            return None
+
+    def update_volatility(self):
+        """Calculate volatility based on recent BTC price movement."""
+        price = self.get_btc_price()
+        if price:
+            self.btc_prices.append(price)
+            self.last_btc_price = price
+
+        if len(self.btc_prices) < 10:
+            self.volatility = "LOW"
+            return
+
+        # Calculate price range over recent samples
+        prices = list(self.btc_prices)
+        min_p, max_p = min(prices), max(prices)
+        range_pct = (max_p - min_p) / min_p * 100
+
+        # Classify volatility
+        if range_pct > 0.3:  # >0.3% move in recent period
+            self.volatility = "HIGH"
+        elif range_pct > 0.1:  # 0.1-0.3% move
+            self.volatility = "MEDIUM"
+        else:
+            self.volatility = "LOW"
+
+    def get_min_profit(self) -> float:
+        """Get minimum profit threshold based on volatility."""
+        if self.volatility == "HIGH":
+            return MIN_PROFIT_HIGH_VOL / 100  # 0.5¢ = 0.005
+        elif self.volatility == "MEDIUM":
+            return 0.3 / 100  # 0.3¢ = 0.003
+        else:
+            return MIN_PROFIT_LOW_VOL / 100  # 0.1¢ = 0.001
+
     def find_hybrid_opportunity(self, market: Dict) -> Optional[Dict]:
         """
         Find hybrid opportunity:
         - MAKER on one side (improve best bid by 1¢)
         - TAKER on other side (buy at ask)
         - Profit = 1.00 - maker_price - taker_price
+
+        Uses dynamic threshold based on volatility.
         """
         yes_ob = self.get_ob(market["yes_token"])
         no_ob = self.get_ob(market["no_token"])
@@ -146,10 +199,13 @@ class HybridMM:
         option_b_cost = yes_ask + no_maker_price
         option_b_profit = 1.0 - option_b_cost
 
+        # Get dynamic threshold based on volatility
+        min_profit = self.get_min_profit()
+
         best = None
 
         # Check Option A
-        if option_a_profit >= MIN_PROFIT_CENTS / 100 and no_ask_size >= ORDER_SIZE:
+        if option_a_profit >= min_profit and no_ask_size >= ORDER_SIZE:
             best = {
                 "market": market,
                 "maker_side": "YES",
@@ -164,7 +220,7 @@ class HybridMM:
             }
 
         # Check Option B
-        if option_b_profit >= MIN_PROFIT_CENTS / 100 and yes_ask_size >= ORDER_SIZE:
+        if option_b_profit >= min_profit and yes_ask_size >= ORDER_SIZE:
             if best is None or option_b_profit > best["profit"]:
                 best = {
                     "market": market,
@@ -346,9 +402,10 @@ class HybridMM:
     def run(self):
         """Main loop."""
         print(f"\n{'='*60}")
-        print("HYBRID MARKET MAKER")
+        print("HYBRID MARKET MAKER (ADAPTIVE)")
         print("Maker on one side → Instant taker hedge")
-        print(f"Size: ${ORDER_SIZE} | Min profit: {MIN_PROFIT_CENTS}¢")
+        print(f"Size: ${ORDER_SIZE}")
+        print(f"Low vol: {MIN_PROFIT_LOW_VOL}¢ min | High vol: {MIN_PROFIT_HIGH_VOL}¢ min")
         print("Press Ctrl+C to stop")
         print(f"{'='*60}")
 
@@ -358,6 +415,10 @@ class HybridMM:
             try:
                 scan += 1
                 ts = datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M:%S ET")
+
+                # Update volatility every scan
+                self.update_volatility()
+                min_profit_now = self.get_min_profit() * 100  # in cents
 
                 # 2-hour dashboard
                 if time.time() - self.last_dashboard > DASHBOARD_INTERVAL:
@@ -378,7 +439,7 @@ class HybridMM:
                     opp = self.find_hybrid_opportunity(m)
                     if opp:
                         opportunities.append(opp)
-                        status_parts.append(f"{m['hour']}:H{opp['profit_cents']:+.1f}¢")
+                        status_parts.append(f"{m['hour']}:{opp['profit_cents']:+.1f}¢✓")
                     else:
                         # Show current spread
                         yes_ob = self.get_ob(m["yes_token"])
@@ -386,10 +447,11 @@ class HybridMM:
                         if yes_ob["bids"] and no_ob["bids"] and yes_ob["asks"] and no_ob["asks"]:
                             h1 = (1 - (yes_ob["bids"][0][0] + 0.01 + no_ob["asks"][0][0])) * 100
                             h2 = (1 - (yes_ob["asks"][0][0] + no_ob["bids"][0][0] + 0.01)) * 100
-                            status_parts.append(f"{m['hour']}:H{max(h1,h2):+.1f}¢")
+                            status_parts.append(f"{m['hour']}:{max(h1,h2):+.1f}¢")
 
                 status = " | ".join(status_parts) if status_parts else "..."
-                print(f"\r[{ts}] #{scan} | {status} | P&L: ${self.total_pnl:+.2f}   ", end="", flush=True)
+                vol_indicator = f"VOL:{self.volatility[0]}" # L/M/H
+                print(f"\r[{ts}] #{scan} | {vol_indicator}>{min_profit_now:.1f}¢ | {status} | P&L: ${self.total_pnl:+.2f}   ", end="", flush=True)
 
                 # Execute best opportunity
                 if opportunities:
