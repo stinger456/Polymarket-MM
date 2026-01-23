@@ -38,8 +38,8 @@ CHAIN_ID = 137
 
 # Config
 ORDER_SIZE = float(os.getenv("BASE_ORDER_SIZE", "5"))
-MIN_PROFIT_LOW_VOL = 0.1   # 0.1¢ minimum during low volatility
-MIN_PROFIT_HIGH_VOL = 0.5  # 0.5¢ minimum during high volatility
+MIN_PROFIT_LOW_VOL = 0.0   # 0¢ = breakeven OK during low volatility
+MIN_PROFIT_HIGH_VOL = 0.3  # 0.3¢ minimum during high volatility
 MAKER_TIMEOUT = 30  # Seconds to wait for maker fill
 DASHBOARD_INTERVAL = 2 * 60 * 60  # 2 hours
 
@@ -163,16 +163,16 @@ class HybridMM:
     def get_min_profit(self) -> float:
         """Get minimum profit threshold based on volatility."""
         if self.volatility == "HIGH":
-            return MIN_PROFIT_HIGH_VOL / 100  # 0.5¢ = 0.005
+            return MIN_PROFIT_HIGH_VOL / 100  # 0.3¢ = 0.003
         elif self.volatility == "MEDIUM":
-            return 0.3 / 100  # 0.3¢ = 0.003
+            return 0.1 / 100  # 0.1¢ = 0.001
         else:
-            return MIN_PROFIT_LOW_VOL / 100  # 0.1¢ = 0.001
+            return MIN_PROFIT_LOW_VOL / 100  # 0¢ = breakeven OK
 
     def find_hybrid_opportunity(self, market: Dict) -> Optional[Dict]:
         """
         Find hybrid opportunity:
-        - MAKER on one side (improve best bid by 1¢)
+        - MAKER on one side (post at ask - 1¢ for best fill chance)
         - TAKER on other side (buy at ask)
         - Profit = 1.00 - maker_price - taker_price
 
@@ -189,13 +189,16 @@ class HybridMM:
         no_bid = no_ob["bids"][0][0]
         no_ask, no_ask_size = no_ob["asks"][0]
 
+        # AGGRESSIVE: Post maker at ask - 1¢ (top of bid queue, best fill chance)
         # Option A: Maker on YES, Taker on NO
-        yes_maker_price = round(yes_bid + 0.01, 2)  # Improve bid by 1¢
+        yes_maker_price = round(yes_ask - 0.01, 2)  # 1¢ below ask = top of queue
+        yes_maker_price = max(yes_maker_price, yes_bid)  # But at least match best bid
         option_a_cost = yes_maker_price + no_ask
         option_a_profit = 1.0 - option_a_cost
 
         # Option B: Maker on NO, Taker on YES
-        no_maker_price = round(no_bid + 0.01, 2)
+        no_maker_price = round(no_ask - 0.01, 2)  # 1¢ below ask = top of queue
+        no_maker_price = max(no_maker_price, no_bid)  # But at least match best bid
         option_b_cost = yes_ask + no_maker_price
         option_b_profit = 1.0 - option_b_cost
 
